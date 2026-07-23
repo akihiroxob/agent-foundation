@@ -1,0 +1,14 @@
+name: agent-harness
+version: 0.1.0
+description: Shared agent harness for Codex and Claude Code.
+author: akihiroxob
+targets:
+  - codex
+  - claude
+  - agent-skills
+
+scripts:
+  generate-runtime: "python3 scripts/generate_runtime_config.py"
+  check-runtime: "python3 scripts/generate_runtime_config.py --check"
+  test: "python3 -m unittest discover -s tests -v"
+  verify: "python3 scripts/generate_runtime_config.py --check && python3 -m unittest discover -s tests -v"

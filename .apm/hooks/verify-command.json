@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/.apm/hooks/scripts/check-dangerous-command.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

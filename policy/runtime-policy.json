@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "commands": {
+    "allow": [
+      ["pnpm", "lint"],
+      ["pnpm", "typecheck"],
+      ["pnpm", "test"],
+      ["pnpm", "verify"],
+      ["git", "status"],
+      ["git", "diff"],
+      ["git", "log"]
+    ],
+    "ask": [
+      ["git", "push"],
+      ["pnpm", "add"],
+      ["pnpm", "remove"]
+    ],
+    "deny": [
+      ["git", "reset", "--hard"],
+      ["git", "clean", "-fd"],
+      ["rm", "-rf"]
+    ]
+  },
+  "filesystem": {
+    "workspace_write": true,
+    "outside_workspace_write": false,
+    "deny_read": [".env", ".env.*", "**/*.pem", "**/*.key"]
+  },
+  "network": {
+    "default": "ask"
+  },
+  "overrides": {
+    "codex": {
+      "approval_policy": "on-request",
+      "sandbox_mode": "workspace-write"
+    },
+    "claude": {
+      "defaultMode": "acceptEdits"
+    }
+  }
+}
