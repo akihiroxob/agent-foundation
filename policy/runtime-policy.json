@@ -29,6 +29,26 @@
   "network": {
     "default": "ask"
   },
+  "mcp": {
+    "wacha": {
+      "allow": [
+        "get_role_instructions",
+        "list_stories",
+        "issue_story",
+        "issue_task",
+        "list_tasks",
+        "claim_task",
+        "add_task_comment",
+        "complete_task",
+        "list_projects",
+        "assign_project_role",
+        "edit_story",
+        "list_task_comments",
+        "reviewed_task",
+        "reject_task"
+      ]
+    }
+  },
   "overrides": {
     "codex": {
       "approval_policy": "on-request",

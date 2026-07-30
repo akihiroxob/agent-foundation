@@ -15,6 +15,12 @@ def render_codex(policy: dict[str, Any]) -> dict[str, str]:
         f'approval_policy = {_quoted(override.get("approval_policy", "on-request"))}\n'
         f'sandbox_mode = {_quoted(override.get("sandbox_mode", "workspace-write"))}\n'
     )
+    for server, server_policy in policy.get("mcp", {}).items():
+        for tool in server_policy.get("allow", []):
+            config += (
+                f'\n[mcp_servers.{server}.tools.{tool}]\n'
+                'approval_mode = "approve"\n'
+            )
 
     decision_map = {"allow": "allow", "ask": "prompt", "deny": "forbidden"}
     rules: list[str] = ["# Generated from policy/runtime-policy.json. Do not edit directly.", ""]

@@ -20,6 +20,12 @@ class RuntimeAdapterTest(unittest.TestCase):
         self.assertIn('decision = "forbidden"', rules)
         self.assertIn('sandbox_mode = "workspace-write"', output[".codex/config.toml"])
 
+    def test_codex_allows_configured_wacha_tools(self):
+        config = render_codex(self.policy)[".codex/config.toml"]
+        for tool in self.policy["mcp"]["wacha"]["allow"]:
+            self.assertIn(f"[mcp_servers.wacha.tools.{tool}]", config)
+        self.assertEqual(len(self.policy["mcp"]["wacha"]["allow"]), config.count('approval_mode = "approve"'))
+
     def test_claude_contains_permission_groups(self):
         output = render_claude(self.policy)
         settings = json.loads(output[".claude/settings.json"])
