@@ -7,6 +7,7 @@ Codex と Claude Code に共通のエージェント設定を配布するため�
 - Skills・Instructions・Hooks は APM のプリミティブとして共通管理する
 - Runtime policy は `policy/runtime-policy.json` を正本とする
 - Codex Rules / sandbox 設定と Claude Code permissions はアダプターで生成する
+- Ralph Runner はエージェントの外側でTask監視とプロセス起動を担当する
 - 生成結果は利用先リポジトリへコピーしてレビュー可能にする
 
 ## 構成
@@ -18,8 +19,11 @@ Codex と Claude Code に共通のエージェント設定を配布するため�
   hooks/                    APM が各ハーネス形式へ変換する Hooks
 policy/runtime-policy.json  共通ランタイムポリシー
 adapters/                   Codex / Claude Code 出力ロジック
+ralph/                      Ralph Runner本体、Backend、Provider、Prompt
+knowledge/                  複数プロジェクトで再利用する恒久的な知識
+docs/adr/                   このリポジトリ自身の設計判断
 scripts/                    生成・検証スクリプト
-tests/                      アダプターのテスト
+tests/                      アダプターとRunnerのテスト
 ```
 
 ## セットアップ
@@ -51,6 +55,19 @@ apm install akihiroxob/agent-harness#v0.1.0 --target codex,claude,agent-skills
 ```
 
 Runtime設定は、当面はこのリポジトリをcloneして生成した`dist/`からコピーします。将来的にはAPM lifecycle scriptや専用CLIで一括導入できます。
+
+## Ralph Runner
+
+WachaのTaskを監視し、Claude CodeのWorkerまたはReviewerを使い捨てで起動するRunnerを同梱しています。
+
+```bash
+python3 scripts/install_ralph.py --target /path/to/project
+cd /path/to/project
+./.ralph/runtime/bin/ralph-loop worker
+./.ralph/runtime/bin/ralph-loop reviewer
+```
+
+詳細は[`ralph/README.md`](ralph/README.md)を参照してください。利用先の`.ralph/config.json`は再インストール時にも保持されます。
 
 ## カスタマイズ
 

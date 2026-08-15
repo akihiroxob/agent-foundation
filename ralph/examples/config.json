@@ -1,0 +1,21 @@
+{
+  "projectName": "your-project",
+  "taskBackend": "wacha",
+  "agentProvider": "claude",
+  "pollIntervalSeconds": 300,
+  "wacha": {
+    "url": "http://localhost:51743/mcp"
+  },
+  "claude": {
+    "command": "claude",
+    "dangerouslySkipPermissions": true
+  },
+  "roles": {
+    "worker": {
+      "agentName": "worker-node-001"
+    },
+    "reviewer": {
+      "agentName": "reviewer-node-001"
+    }
+  }
+}

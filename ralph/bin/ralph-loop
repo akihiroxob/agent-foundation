@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Worker または Reviewer を1実行ずつ起動し、対象Taskがなくなるまで監視する。
+set -euo pipefail
+
+usage() {
+  cat >&2 <<'EOF'
+使い方: ralph-loop [--config PATH] <worker|reviewer>
+EOF
+  exit 1
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RALPH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CONFIG_PATH=""
+
+if [[ "${1:-}" == "--config" ]]; then
+  [[ -n "${2:-}" ]] || usage
+  CONFIG_PATH="$2"
+  shift 2
+fi
+
+role="${1:-}"
+case "$role" in
+  worker | reviewer) ;;
+  *) usage ;;
+esac
+[[ $# -eq 1 ]] || usage
+
+if [[ -z "$CONFIG_PATH" ]]; then
+  CONFIG_PATH="$PWD/.ralph/config.json"
+fi
+[[ -f "$CONFIG_PATH" ]] || {
+  printf 'Ralph設定が見つかりません: %s\n' "$CONFIG_PATH" >&2
+  exit 1
+}
+CONFIG_PATH="$(cd "$(dirname "$CONFIG_PATH")" && pwd)/$(basename "$CONFIG_PATH")"
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || {
+    printf '必要なコマンドが見つかりません: %s\n' "$1" >&2
+    exit 1
+  }
+}
+
+config_string() {
+  local expression="$1"
+  jq -er "$expression | strings | select(length > 0)" "$CONFIG_PATH"
+}
+
+config_optional_string() {
+  local expression="$1"
+  jq -r "$expression // empty | strings" "$CONFIG_PATH"
+}
+
+require_command jq
+jq -e 'type == "object"' "$CONFIG_PATH" >/dev/null || {
+  printf 'Ralph設定はJSONオブジェクトである必要があります: %s\n' "$CONFIG_PATH" >&2
+  exit 1
+}
+
+PROJECT_ROOT="$(config_optional_string '.projectRoot')"
+if [[ -z "$PROJECT_ROOT" ]]; then
+  PROJECT_ROOT="$(cd "$(dirname "$CONFIG_PATH")/.." && pwd)"
+elif [[ "$PROJECT_ROOT" != /* ]]; then
+  PROJECT_ROOT="$(cd "$(dirname "$CONFIG_PATH")/../$PROJECT_ROOT" && pwd)"
+fi
+[[ -d "$PROJECT_ROOT" ]] || {
+  printf 'projectRootがディレクトリではありません: %s\n' "$PROJECT_ROOT" >&2
+  exit 1
+}
+
+RALPH_PROJECT_NAME="$(config_string '.projectName')"
+TASK_BACKEND="$(config_string '.taskBackend')"
+AGENT_PROVIDER="$(config_string '.agentProvider')"
+POLL_INTERVAL_SECONDS="$(jq -er '.pollIntervalSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
+WACHA_AGENT_NAME="$(config_string ".roles.${role}.agentName")"
+PROMPT_PATH="$(config_optional_string ".roles.${role}.prompt")"
+
+export RALPH_CONFIG_PATH="$CONFIG_PATH"
+export RALPH_PROJECT_NAME
+export RALPH_PROJECT_ROOT="$PROJECT_ROOT"
+export WACHA_AGENT_NAME
+
+case "$TASK_BACKEND" in
+  wacha) source "$RALPH_ROOT/backends/wacha.sh" ;;
+  *)
+    printf '未対応のtaskBackendです: %s\n' "$TASK_BACKEND" >&2
+    exit 1
+    ;;
+esac
+
+case "$AGENT_PROVIDER" in
+  claude) source "$RALPH_ROOT/providers/claude.sh" ;;
+  *)
+    printf '未対応のagentProviderです: %s\n' "$AGENT_PROVIDER" >&2
+    exit 1
+    ;;
+esac
+
+if [[ -z "$PROMPT_PATH" ]]; then
+  PROMPT_PATH="$RALPH_ROOT/prompts/$role.md"
+elif [[ "$PROMPT_PATH" != /* ]]; then
+  PROMPT_PATH="$PROJECT_ROOT/$PROMPT_PATH"
+fi
+[[ -f "$PROMPT_PATH" ]] || {
+  printf 'Promptが見つかりません: %s\n' "$PROMPT_PATH" >&2
+  exit 1
+}
+
+rendered_prompt="$(mktemp "${TMPDIR:-/tmp}/ralph-prompt.XXXXXX")"
+cleanup() {
+  rm -f "$rendered_prompt"
+}
+trap cleanup EXIT INT TERM
+
+prompt_content="$(<"$PROMPT_PATH")"
+prompt_content="${prompt_content//\{\{PROJECT_NAME\}\}/$RALPH_PROJECT_NAME}"
+prompt_content="${prompt_content//\{\{PROJECT_ROOT\}\}/$PROJECT_ROOT}"
+printf '%s\n' "$prompt_content" >"$rendered_prompt"
+
+backend_requirements
+provider_requirements
+
+while true; do
+  summary="$(backend_get_task_summary)"
+  backend_print_status "$role" "$summary"
+  pending="$(backend_pending_count "$role" "$summary")"
+  if (( pending == 0 )); then
+    printf '%sが処理するTaskがないため %d 秒待機します。\n' "$role" "$POLL_INTERVAL_SECONDS"
+    sleep "$POLL_INTERVAL_SECONDS"
+    continue
+  fi
+
+  printf '\n%sを起動します。\n' "$role"
+  provider_run "$rendered_prompt" "$PROJECT_ROOT"
+
+  updated_summary="$(backend_get_task_summary)"
+  if [[ "$(jq -cS . <<<"$summary")" == "$(jq -cS . <<<"$updated_summary")" ]]; then
+    printf '%s実行後もTask状態が変化しなかったため終了します。ログと権限設定を確認してください。\n' "$role" >&2
+    exit 1
+  fi
+done
