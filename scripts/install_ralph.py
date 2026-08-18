@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,10 +38,15 @@ def install_local(target: Path) -> tuple[Path, bool]:
 
     config_path = ralph_dir / "config.json"
     created_config = not config_path.exists()
-    if created_config:
-        config = json.loads((SOURCE / "examples" / "config.json").read_text(encoding="utf-8"))
-        config["projectName"] = target.name
-        config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [str(executable), "init", "--project-root", str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stdout.strip() or result.stderr.strip() or "unknown error"
+        raise ValueError(f"Failed to initialize Ralph project: {message}")
 
     return executable, created_config
 

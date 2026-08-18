@@ -28,6 +28,16 @@ cd /path/to/project
 ralph init
 ```
 
+`ralph init`は次のRepo固有設定を作成または更新します。
+
+```text
+.ralph/config.json       RalphとWachaの設定
+.mcp.json                Claude CodeのWacha MCP接続設定
+.claude/settings.json    Wacha MCPの有効化とツール権限
+```
+
+既存の`.mcp.json`と`.claude/settings.json`がある場合は、Wacha関連だけをマージし、その他のMCPサーバー、権限、設定を保持します。JSONが壊れている場合や既存フィールドの型が不正な場合は上書きせずに終了します。
+
 ## Repo-localインストール
 
 チームやCIでRunnerのバージョンを固定したい場合は、利用先リポジトリへRuntimeを配置できます。
@@ -39,6 +49,9 @@ python3 scripts/install_ralph.py --target /path/to/project
 利用先には次のファイルが作成されます。
 
 ```text
+.mcp.json
+.claude/
+  settings.json
 .ralph/
   config.json
   runtime/
@@ -58,6 +71,10 @@ python3 scripts/install_ralph.py --target /path/to/project
 ```bash
 ralph init --project-name wacha-project-name
 ```
+
+Wacha MCPのURLは`.ralph/config.json`の`wacha.url`を正本とし、`ralph init`を再実行すると`.mcp.json`へ反映されます。APMやRuntime設定を後から配置した場合も、最後に`ralph init`を再実行してください。
+
+Claude Codeへ渡すAuthorizationヘッダーは`Bearer ${WACHA_AGENT_NAME}`です。`ralph run`がロールごとのAgent名を環境変数として設定してからClaude Codeを起動します。
 
 自律実行でClaude Codeの権限確認を省略する必要がある場合だけ、内容を理解したうえで次を設定してください。
 

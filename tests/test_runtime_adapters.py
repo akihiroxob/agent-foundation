@@ -36,6 +36,11 @@ class RuntimeAdapterTest(unittest.TestCase):
         self.assertTrue(permissions["deny"])
         self.assertIn("Read(./.env)", permissions["deny"])
 
+    def test_claude_allows_configured_mcp_servers(self):
+        settings = json.loads(render_claude(self.policy)[".claude/settings.json"])
+        for server in self.policy["mcp"]:
+            self.assertIn(f"mcp__{server}", settings["permissions"]["allow"])
+
 
 if __name__ == "__main__":
     unittest.main()

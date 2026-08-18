@@ -26,18 +26,24 @@ class RalphInstallerTest(unittest.TestCase):
             self.assertTrue((target / ".ralph/runtime/prompts/worker.md").is_file())
             config = json.loads((target / ".ralph/config.json").read_text(encoding="utf-8"))
             self.assertEqual("sample-project", config["projectName"])
+            mcp_config = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))
+            self.assertEqual("http", mcp_config["mcpServers"]["wacha"]["type"])
+            settings = json.loads((target / ".claude/settings.json").read_text(encoding="utf-8"))
+            self.assertIn("mcp__wacha", settings["permissions"]["allow"])
+            self.assertIn("wacha", settings["enabledMcpjsonServers"])
 
     def test_local_reinstall_keeps_existing_config(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"
             config_path = target / ".ralph/config.json"
             config_path.parent.mkdir(parents=True)
-            config_path.write_text('{"projectName": "custom"}\n', encoding="utf-8")
+            original = '{"projectName": "custom", "wacha": {"url": "http://wacha.test/mcp"}}\n'
+            config_path.write_text(original, encoding="utf-8")
 
             _, created_config = install_local(target)
 
             self.assertFalse(created_config)
-            self.assertEqual('{"projectName": "custom"}\n', config_path.read_text(encoding="utf-8"))
+            self.assertEqual(original, config_path.read_text(encoding="utf-8"))
 
     def test_installs_global_runtime_and_launcher(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -68,6 +74,16 @@ class RalphInstallerTest(unittest.TestCase):
             bin_dir.mkdir()
             launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
 
+            (target / ".claude").mkdir()
+            (target / ".mcp.json").write_text(
+                '{"mcpServers":{"other":{"type":"http","url":"http://other.test/mcp"}}}\n',
+                encoding="utf-8",
+            )
+            (target / ".claude/settings.json").write_text(
+                '{"permissions":{"allow":["Bash"],"deny":["Bash(git push)"]},"custom":true}\n',
+                encoding="utf-8",
+            )
+
             fake_curl = bin_dir / "curl"
             fake_curl.write_text(
                 """#!/usr/bin/env bash
@@ -95,6 +111,14 @@ fi
                 text=True,
                 timeout=10,
             )
+            reinit_result = subprocess.run(
+                [str(launcher), "init"],
+                cwd=target,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
             result = subprocess.run(
                 [str(launcher), "run", "worker"],
                 cwd=target,
@@ -105,10 +129,48 @@ fi
             )
 
             self.assertEqual(0, init_result.returncode)
+            self.assertEqual(0, reinit_result.returncode)
             self.assertTrue((target / ".ralph/config.json").is_file())
+            mcp_config = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))
+            self.assertIn("other", mcp_config["mcpServers"])
+            self.assertEqual(
+                "Bearer ${WACHA_AGENT_NAME}",
+                mcp_config["mcpServers"]["wacha"]["headers"]["Authorization"],
+            )
+            settings = json.loads((target / ".claude/settings.json").read_text(encoding="utf-8"))
+            self.assertTrue(settings["custom"])
+            self.assertIn("Bash", settings["permissions"]["allow"])
+            self.assertIn("mcp__wacha", settings["permissions"]["allow"])
+            self.assertEqual(1, settings["permissions"]["allow"].count("mcp__wacha"))
+            self.assertIn("Bash(git push)", settings["permissions"]["deny"])
+            self.assertIn("wacha", settings["enabledMcpjsonServers"])
+            self.assertEqual(1, settings["enabledMcpjsonServers"].count("wacha"))
             self.assertEqual(1, result.returncode)
             self.assertIn("Worker対象: todo=1", result.stdout)
             self.assertIn("Task状態が変化しなかった", result.stderr)
+
+    def test_init_rejects_invalid_claude_settings_without_overwriting_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sample-project"
+            target.mkdir()
+            settings_path = target / ".claude/settings.json"
+            settings_path.parent.mkdir()
+            original = '{"permissions":{"allow":"invalid"}}\n'
+            settings_path.write_text(original, encoding="utf-8")
+            launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
+
+            result = subprocess.run(
+                [str(launcher), "init"],
+                cwd=target,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("permissions.allow must be a string array", result.stdout)
+            self.assertEqual(original, settings_path.read_text(encoding="utf-8"))
+            self.assertFalse((target / ".mcp.json").exists())
 
 
 if __name__ == "__main__":

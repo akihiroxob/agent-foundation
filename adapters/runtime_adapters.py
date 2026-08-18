@@ -55,6 +55,9 @@ def render_claude(policy: dict[str, Any]) -> dict[str, str]:
     permissions["deny"].extend(
         f"Read(./{path})" for path in policy.get("filesystem", {}).get("deny_read", [])
     )
+    permissions["allow"].extend(
+        f"mcp__{server}" for server in policy.get("mcp", {})
+    )
     settings = {"permissions": permissions}
     return {".claude/settings.json": json.dumps(settings, ensure_ascii=False, indent=2) + "\n"}
 
