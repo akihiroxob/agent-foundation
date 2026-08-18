@@ -11,9 +11,26 @@ WachaのTask状態を監視し、Claude CodeのWorkerまたはReviewerを1 Task�
 
 現在対応している組み合わせはWachaとClaude Codeです。
 
-## インストール
+## Globalインストール
 
 このリポジトリのルートで実行します。
+
+```bash
+python3 scripts/install_ralph.py --global
+```
+
+既定ではRuntimeを`~/.local/share/agent-foundation/ralph/runtime/`、CLIを`~/.local/bin/ralph`へ配置します。`~/.local/bin`が`PATH`に含まれていない場合は追加してください。
+
+利用先リポジトリで設定を初期化します。
+
+```bash
+cd /path/to/project
+ralph init
+```
+
+## Repo-localインストール
+
+チームやCIでRunnerのバージョンを固定したい場合は、利用先リポジトリへRuntimeを配置できます。
 
 ```bash
 python3 scripts/install_ralph.py --target /path/to/project
@@ -25,17 +42,22 @@ python3 scripts/install_ralph.py --target /path/to/project
 .ralph/
   config.json
   runtime/
+    bin/ralph
     bin/ralph-loop
     backends/wacha.sh
     providers/claude.sh
     prompts/
 ```
 
-既存の`.ralph/config.json`は上書きしません。Runner本体を更新する場合は、同じコマンドを再実行します。
+既存の`.ralph/config.json`は上書きしません。Repo-localのRunner本体を更新する場合は、同じコマンドを再実行します。
 
 ## 設定
 
-`.ralph/config.json`の`projectName`をWacha上のプロジェクト名に合わせます。`projectRoot`を省略した場合、`.ralph/`の親ディレクトリが対象になります。
+`ralph init`またはRepo-localインストールにより、利用先へ`.ralph/config.json`が作られます。`projectName`をWacha上のプロジェクト名に合わせます。ディレクトリ名と異なる場合は初期化時に指定できます。
+
+```bash
+ralph init --project-name wacha-project-name
+```
 
 自律実行でClaude Codeの権限確認を省略する必要がある場合だけ、内容を理解したうえで次を設定してください。
 
@@ -49,11 +71,18 @@ python3 scripts/install_ralph.py --target /path/to/project
 
 ## 実行
 
-利用先リポジトリのルートで実行します。
+Global版は利用先リポジトリのルートまたは配下で実行します。Gitリポジトリの場合はルートを自動検出します。
 
 ```bash
-./.ralph/runtime/bin/ralph-loop worker
-./.ralph/runtime/bin/ralph-loop reviewer
+ralph run worker
+ralph run reviewer
+```
+
+Repo-local版は次のように実行します。
+
+```bash
+./.ralph/runtime/bin/ralph run worker
+./.ralph/runtime/bin/ralph run reviewer
 ```
 
 既定では対象Taskがない間、300秒ごとに再確認します。Agent実行後もTask状態が変化しない場合は、無限にAgentを起動しないようエラー終了します。

@@ -5,18 +5,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.install_ralph import install
+from scripts.install_ralph import install_global, install_local
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class RalphInstallerTest(unittest.TestCase):
-    def test_installs_runtime_and_project_config(self):
+    def test_installs_local_runtime_and_project_config(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"
             target.mkdir()
 
-            executable, created_config = install(target)
+            executable, created_config = install_local(target)
 
             self.assertTrue(created_config)
             self.assertTrue(executable.is_file())
@@ -27,17 +27,30 @@ class RalphInstallerTest(unittest.TestCase):
             config = json.loads((target / ".ralph/config.json").read_text(encoding="utf-8"))
             self.assertEqual("sample-project", config["projectName"])
 
-    def test_keeps_existing_config_when_reinstalling(self):
+    def test_local_reinstall_keeps_existing_config(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"
             config_path = target / ".ralph/config.json"
             config_path.parent.mkdir(parents=True)
             config_path.write_text('{"projectName": "custom"}\n', encoding="utf-8")
 
-            _, created_config = install(target)
+            _, created_config = install_local(target)
 
             self.assertFalse(created_config)
             self.assertEqual('{"projectName": "custom"}\n', config_path.read_text(encoding="utf-8"))
+
+    def test_installs_global_runtime_and_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            launcher, runtime_dir = install_global(root / "share", root / "bin")
+
+            self.assertEqual(root.resolve() / "bin/ralph", launcher)
+            self.assertTrue(launcher.stat().st_mode & 0o111)
+            self.assertTrue((runtime_dir / "bin/ralph").is_file())
+            self.assertTrue((runtime_dir / "bin/ralph-loop").is_file())
+            self.assertTrue((runtime_dir / "examples/config.json").is_file())
+            self.assertNotIn(".ralph", {path.name for path in root.iterdir()})
 
     def test_shell_sources_have_valid_syntax(self):
         shell_files = [
@@ -47,13 +60,13 @@ class RalphInstallerTest(unittest.TestCase):
         ]
         subprocess.run(["bash", "-n", *map(str, shell_files)], check=True)
 
-    def test_installed_runner_stops_when_agent_does_not_change_task_state(self):
+    def test_global_cli_initializes_and_runs_project(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"
             bin_dir = Path(directory) / "bin"
             target.mkdir()
             bin_dir.mkdir()
-            executable, _ = install(target)
+            launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
 
             fake_curl = bin_dir / "curl"
             fake_curl.write_text(
@@ -74,8 +87,16 @@ fi
 
             environment = os.environ.copy()
             environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            init_result = subprocess.run(
+                [str(launcher), "init"],
+                cwd=target,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
             result = subprocess.run(
-                [str(executable), "worker"],
+                [str(launcher), "run", "worker"],
                 cwd=target,
                 env=environment,
                 capture_output=True,
@@ -83,6 +104,8 @@ fi
                 timeout=10,
             )
 
+            self.assertEqual(0, init_result.returncode)
+            self.assertTrue((target / ".ralph/config.json").is_file())
             self.assertEqual(1, result.returncode)
             self.assertIn("Worker対象: todo=1", result.stdout)
             self.assertIn("Task状態が変化しなかった", result.stderr)

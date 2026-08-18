@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+from pathlib import Path
+
+RUNTIME_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = RUNTIME_ROOT / "examples" / "config.json"
+LOOP_COMMAND = RUNTIME_ROOT / "bin" / "ralph-loop"
+
+
+def find_project_root(explicit: Path | None = None) -> Path:
+    if explicit is not None:
+        root = explicit.expanduser().resolve()
+    else:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        root = Path(result.stdout.strip()).resolve() if result.returncode == 0 else Path.cwd().resolve()
+
+    if not root.is_dir():
+        raise ValueError(f"Project directory does not exist: {root}")
+    return root
+
+
+def initialize_project(root: Path, project_name: str | None, force: bool) -> tuple[Path, bool]:
+    config_path = root / ".ralph" / "config.json"
+    if config_path.exists() and not force:
+        return config_path, False
+
+    config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    config["projectName"] = project_name or root.name
+    config_path.parent.mkdir(exist_ok=True)
+    config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return config_path, True
+
+
+def init_command(args: argparse.Namespace) -> int:
+    try:
+        root = find_project_root(args.project_root)
+    except ValueError as error:
+        print(error)
+        return 2
+
+    config_path, created = initialize_project(root, args.project_name, args.force)
+    action = "created" if created else "kept existing"
+    print(f"{action} config: {config_path}")
+    return 0
+
+
+def run_command(args: argparse.Namespace) -> int:
+    try:
+        root = find_project_root(args.project_root)
+    except ValueError as error:
+        print(error)
+        return 2
+
+    config_path = args.config.expanduser().resolve() if args.config else root / ".ralph" / "config.json"
+    if not config_path.is_file():
+        print(f"Ralph config does not exist: {config_path}")
+        print("Run `ralph init` in the project first.")
+        return 2
+
+    environment = os.environ.copy()
+    os.execve(
+        LOOP_COMMAND,
+        [str(LOOP_COMMAND), "--config", str(config_path), args.role],
+        environment,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ralph", description="Run disposable Worker and Reviewer agents.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init", help="Create repository-specific Ralph configuration.")
+    init_parser.add_argument("--project-root", type=Path)
+    init_parser.add_argument("--project-name")
+    init_parser.add_argument("--force", action="store_true")
+    init_parser.set_defaults(handler=init_command)
+
+    run_parser = subparsers.add_parser("run", help="Run a Worker or Reviewer loop.")
+    run_parser.add_argument("role", choices=("worker", "reviewer"))
+    run_parser.add_argument("--project-root", type=Path)
+    run_parser.add_argument("--config", type=Path)
+    run_parser.set_defaults(handler=run_command)
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    return args.handler(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
