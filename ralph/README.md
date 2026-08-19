@@ -4,7 +4,7 @@ WachaのTask状態を監視し、Claude CodeのWorkerまたはReviewerを1 Task�
 
 ## 責務
 
-- Ralph Runner: Taskの有無の確認、エージェントプロセスの起動、異常時の停止
+- Ralph Runner: Taskの有無の確認、エージェントプロセスの起動、失敗時の待機と再試行
 - Wacha: Task、担当、進捗、レビュー状態の管理
 - Agent provider: Claude Codeなどの実行環境固有の起動処理
 - 利用先リポジトリ: プロジェクト固有の設定、仕様、知識
@@ -102,7 +102,23 @@ Repo-local版は次のように実行します。
 ./.ralph/runtime/bin/ralph run reviewer
 ```
 
-既定では対象Taskがない間、300秒ごとに再確認します。Agent実行後もTask状態が変化しない場合は、無限にAgentを起動しないようエラー終了します。
+既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
+
+Claude CodeのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。300秒から再試行を始め、失敗が続く間は最大3600秒まで待機時間を倍増します。Claude Codeが終了コード0で終了してもTask状態が変化しなかった場合は、同じ再試行経路へ入ります。
+
+待機時間は`.ralph/config.json`で変更できます。
+
+```json
+{
+  "pollIntervalSeconds": 300,
+  "retry": {
+    "initialSeconds": 300,
+    "maxSeconds": 3600
+  }
+}
+```
+
+正常なTask状態変化または利用可能Taskがない状態を確認すると、再試行間隔は初期値へ戻ります。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
 
 プロジェクト固有のPromptが必要な場合は、利用先にファイルを置き、ロール設定へプロジェクトルートからの相対パスを指定します。
 

@@ -3,6 +3,10 @@
   "taskBackend": "wacha",
   "agentProvider": "claude",
   "pollIntervalSeconds": 300,
+  "retry": {
+    "initialSeconds": 300,
+    "maxSeconds": 3600
+  },
   "wacha": {
     "url": "http://localhost:51743/mcp"
   },

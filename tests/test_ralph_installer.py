@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -87,10 +88,13 @@ class RalphInstallerTest(unittest.TestCase):
             fake_curl = bin_dir / "curl"
             fake_curl.write_text(
                 """#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$RALPH_TEST_STATE_DIR/requests"
 if [[ "$*" == *'list_projects'* ]]; then
   printf '%s\\n' '{"result":{"structuredContent":{"projects":[{"id":"project-1","name":"sample-project"}]}}}'
+elif [[ -f "$RALPH_TEST_STATE_DIR/done" ]]; then
+  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"todo":0,"rejected":0,"doing":0,"in_review":0,"accepted":1}},"tasks":[]}}}'
 else
-  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"todo":1,"rejected":0,"doing":0,"in_review":0}}}}}'
+  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"todo":1,"rejected":0,"doing":0,"in_review":0}},"tasks":[{"id":"task-1"}]}}}'
 fi
 """,
                 encoding="utf-8",
@@ -98,11 +102,27 @@ fi
             fake_curl.chmod(0o755)
 
             fake_claude = bin_dir / "claude"
-            fake_claude.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_claude.write_text(
+                """#!/usr/bin/env bash
+count=0
+if [[ -f "$RALPH_TEST_STATE_DIR/count" ]]; then
+  count="$(<"$RALPH_TEST_STATE_DIR/count")"
+fi
+count=$((count + 1))
+printf '%s\\n' "$count" >"$RALPH_TEST_STATE_DIR/count"
+if (( count == 1 )); then
+  exit 42
+fi
+touch "$RALPH_TEST_STATE_DIR/done"
+exit 0
+""",
+                encoding="utf-8",
+            )
             fake_claude.chmod(0o755)
 
             environment = os.environ.copy()
             environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["RALPH_TEST_STATE_DIR"] = directory
             init_result = subprocess.run(
                 [str(launcher), "init"],
                 cwd=target,
@@ -119,14 +139,25 @@ fi
                 text=True,
                 timeout=10,
             )
-            result = subprocess.run(
+            config_path = target / ".ralph/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["pollIntervalSeconds"] = 1
+            config["retry"] = {"initialSeconds": 1, "maxSeconds": 1}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            process = subprocess.Popen(
                 [str(launcher), "run", "worker"],
                 cwd=target,
                 env=environment,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=10,
             )
+            deadline = time.monotonic() + 8
+            while not (Path(directory) / "done").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=5)
 
             self.assertEqual(0, init_result.returncode)
             self.assertEqual(0, reinit_result.returncode)
@@ -145,9 +176,13 @@ fi
             self.assertIn("Bash(git push)", settings["permissions"]["deny"])
             self.assertIn("wacha", settings["enabledMcpjsonServers"])
             self.assertEqual(1, settings["enabledMcpjsonServers"].count("wacha"))
-            self.assertEqual(1, result.returncode)
-            self.assertIn("Worker対象: todo=1", result.stdout)
-            self.assertIn("Task状態が変化しなかった", result.stderr)
+            self.assertTrue((Path(directory) / "done").exists())
+            self.assertEqual("2", (Path(directory) / "count").read_text(encoding="utf-8").strip())
+            self.assertIn("Worker対象: todo=1", stdout)
+            self.assertIn("終了コード 42", stderr)
+            self.assertIn("1秒後に再試行", stderr)
+            requests = (Path(directory) / "requests").read_text(encoding="utf-8")
+            self.assertIn('"availableFor":"work"', requests)
 
     def test_init_rejects_invalid_claude_settings_without_overwriting_them(self):
         with tempfile.TemporaryDirectory() as directory:

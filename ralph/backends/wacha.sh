@@ -43,7 +43,13 @@ mcp_call() {
 }
 
 backend_get_task_summary() {
-  local project_id projects tasks
+  local role="$1"
+  local availability project_id projects tasks
+  if [[ "$role" == worker ]]; then
+    availability="work"
+  else
+    availability="review"
+  fi
   projects="$(mcp_call 'list_projects' '{}')"
   project_id="$(jq -r --arg name "$RALPH_PROJECT_NAME" \
     '.result.structuredContent.projects[] | select(.name == $name) | .id' <<<"$projects" | head -n 1)"
@@ -52,26 +58,29 @@ backend_get_task_summary() {
     exit 1
   }
 
-  tasks="$(mcp_call 'list_tasks' "$(jq -cn --arg project_id "$project_id" '{projectId: $project_id}')")"
-  jq -e '.result.structuredContent.summary.byStatus' <<<"$tasks"
+  tasks="$(mcp_call 'list_tasks' "$(jq -cn \
+    --arg project_id "$project_id" \
+    --arg availability "$availability" \
+    '{projectId: $project_id, filter: {availableFor: $availability}, limit: 1}')")"
+  jq -e '{
+    byStatus: .result.structuredContent.summary.byStatus,
+    availableCount: ((.result.structuredContent.tasks // []) | length)
+  }' <<<"$tasks"
 }
 
 backend_print_status() {
   local role="$1"
   local summary="$2"
   if [[ "$role" == worker ]]; then
-    jq -r '"Worker対象: todo=\(.todo // 0) rejected=\(.rejected // 0) doing=\(.doing // 0)"' <<<"$summary"
+    jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0)"' <<<"$summary"
   else
-    jq -r '"Reviewer対象: in_review=\(.in_review // 0)"' <<<"$summary"
+    jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0)"' <<<"$summary"
   fi
 }
 
 backend_pending_count() {
   local role="$1"
   local summary="$2"
-  if [[ "$role" == worker ]]; then
-    jq -r '(.todo // 0) + (.rejected // 0) + (.doing // 0)' <<<"$summary"
-  else
-    jq -r '.in_review // 0' <<<"$summary"
-  fi
+  : "$role"
+  jq -r '.availableCount // 0' <<<"$summary"
 }

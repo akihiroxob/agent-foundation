@@ -73,8 +73,14 @@ RALPH_PROJECT_NAME="$(config_string '.projectName')"
 TASK_BACKEND="$(config_string '.taskBackend')"
 AGENT_PROVIDER="$(config_string '.agentProvider')"
 POLL_INTERVAL_SECONDS="$(jq -er '.pollIntervalSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
+RETRY_INITIAL_SECONDS="$(jq -er '.retry.initialSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
+RETRY_MAX_SECONDS="$(jq -er '.retry.maxSeconds // 3600 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
 WACHA_AGENT_NAME="$(config_string ".roles.${role}.agentName")"
 PROMPT_PATH="$(config_optional_string ".roles.${role}.prompt")"
+(( RETRY_MAX_SECONDS >= RETRY_INITIAL_SECONDS )) || {
+  printf 'retry.maxSecondsはretry.initialSeconds以上にしてください。\n' >&2
+  exit 1
+}
 
 export RALPH_CONFIG_PATH="$CONFIG_PATH"
 export RALPH_PROJECT_NAME
@@ -111,7 +117,9 @@ rendered_prompt="$(mktemp "${TMPDIR:-/tmp}/ralph-prompt.XXXXXX")"
 cleanup() {
   rm -f "$rendered_prompt"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 prompt_content="$(<"$PROMPT_PATH")"
 prompt_content="${prompt_content//\{\{PROJECT_NAME\}\}/$RALPH_PROJECT_NAME}"
@@ -121,22 +129,52 @@ printf '%s\n' "$prompt_content" >"$rendered_prompt"
 backend_requirements
 provider_requirements
 
+retry_delay="$RETRY_INITIAL_SECONDS"
+
+wait_with_backoff() {
+  local reason="$1"
+  printf '%s %d秒後に再試行します。\n' "$reason" "$retry_delay" >&2
+  sleep "$retry_delay"
+  if (( retry_delay < RETRY_MAX_SECONDS )); then
+    retry_delay=$((retry_delay * 2))
+    if (( retry_delay > RETRY_MAX_SECONDS )); then
+      retry_delay="$RETRY_MAX_SECONDS"
+    fi
+  fi
+}
+
 while true; do
-  summary="$(backend_get_task_summary)"
+  if ! summary="$(backend_get_task_summary "$role")"; then
+    wait_with_backoff 'Wachaの状態取得に失敗しました。'
+    continue
+  fi
   backend_print_status "$role" "$summary"
   pending="$(backend_pending_count "$role" "$summary")"
   if (( pending == 0 )); then
+    retry_delay="$RETRY_INITIAL_SECONDS"
     printf '%sが処理するTaskがないため %d 秒待機します。\n' "$role" "$POLL_INTERVAL_SECONDS"
     sleep "$POLL_INTERVAL_SECONDS"
     continue
   fi
 
   printf '\n%sを起動します。\n' "$role"
-  provider_run "$rendered_prompt" "$PROJECT_ROOT"
-
-  updated_summary="$(backend_get_task_summary)"
-  if [[ "$(jq -cS . <<<"$summary")" == "$(jq -cS . <<<"$updated_summary")" ]]; then
-    printf '%s実行後もTask状態が変化しなかったため終了します。ログと権限設定を確認してください。\n' "$role" >&2
-    exit 1
+  if provider_run "$rendered_prompt" "$PROJECT_ROOT"; then
+    provider_status=0
+  else
+    provider_status=$?
   fi
+  if (( provider_status != 0 )); then
+    wait_with_backoff "${role}が終了コード ${provider_status} で終了しました。"
+    continue
+  fi
+
+  if ! updated_summary="$(backend_get_task_summary "$role")"; then
+    wait_with_backoff 'Agent実行後のWacha状態取得に失敗しました。'
+    continue
+  fi
+  if [[ "$(jq -cS . <<<"$summary")" == "$(jq -cS . <<<"$updated_summary")" ]]; then
+    wait_with_backoff "${role}実行後もTask状態が変化しませんでした。"
+    continue
+  fi
+  retry_delay="$RETRY_INITIAL_SECONDS"
 done
