@@ -56,6 +56,11 @@ apm install akihiroxob/agent-harness#v0.1.0 --target codex,claude,agent-skills
 
 Runtime設定は、当面はこのリポジトリをcloneして生成した`dist/`からコピーします。将来的にはAPM lifecycle scriptや専用CLIで一括導入できます。
 
+## 同梱Skill
+
+- `investigate-bug`: 不具合を再現・切り分けし、最小限の修正と検証を行う
+- `review-documentation-impact`: 実装変更のドキュメント影響を判定し、Workerによる更新とReviewerによる整合性確認を行う
+
 ## Ralph Runner
 
 WachaのTaskを監視し、Claude CodeのWorkerまたはReviewerを使い捨てで起動するRunnerを同梱しています。

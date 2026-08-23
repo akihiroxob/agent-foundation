@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Documentation Impact"
+  short_description: "Check code changes and update affected docs"
+  default_prompt: "Use $review-documentation-impact to check this change for documentation impact and update affected docs."
