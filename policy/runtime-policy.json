@@ -18,7 +18,9 @@
     "deny": [
       ["git", "reset", "--hard"],
       ["git", "clean", "-fd"],
-      ["rm", "-rf"]
+      ["rm", "-rf"],
+      ["pkill"],
+      ["killall"]
     ]
   },
   "filesystem": {
