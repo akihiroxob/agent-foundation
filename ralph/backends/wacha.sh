@@ -36,7 +36,7 @@ mcp_call() {
     --data "$request")"
   response="$(normalize_mcp_response "$raw")"
   jq -e '.result and (.error | not)' >/dev/null <<<"$response" || {
-    printf 'Wacha MCP呼び出しに失敗しました (%s): %s\n' "$tool_name" "$response" >&2
+    ralph_log_error 'Wacha MCP呼び出しに失敗しました (%s): %s\n' "$tool_name" "$response"
     exit 1
   }
   printf '%s\n' "$response"
@@ -54,7 +54,7 @@ backend_get_task_summary() {
   project_id="$(jq -r --arg name "$RALPH_PROJECT_NAME" \
     '.result.structuredContent.projects[] | select(.name == $name) | .id' <<<"$projects" | head -n 1)"
   [[ -n "$project_id" && "$project_id" != 'null' ]] || {
-    printf 'Wachaにプロジェクト %s が見つかりません。\n' "$RALPH_PROJECT_NAME" >&2
+    ralph_log_error 'Wachaにプロジェクト %s が見つかりません。\n' "$RALPH_PROJECT_NAME"
     exit 1
   }
 
@@ -71,11 +71,13 @@ backend_get_task_summary() {
 backend_print_status() {
   local role="$1"
   local summary="$2"
+  local status
   if [[ "$role" == worker ]]; then
-    jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0)"' <<<"$summary"
+    status="$(jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0)"' <<<"$summary")"
   else
-    jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0)"' <<<"$summary"
+    status="$(jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0)"' <<<"$summary")"
   fi
+  ralph_log '%s\n' "$status"
 }
 
 backend_pending_count() {

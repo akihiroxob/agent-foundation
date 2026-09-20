@@ -5,7 +5,7 @@
   "pollIntervalSeconds": 300,
   "retry": {
     "initialSeconds": 300,
-    "maxSeconds": 3600
+    "tokenLimitSeconds": 1800
   },
   "wacha": {
     "url": "http://localhost:51743/mcp"

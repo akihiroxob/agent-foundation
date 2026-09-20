@@ -104,7 +104,7 @@ Repo-local版は次のように実行します。
 
 既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
 
-Claude CodeのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。300秒から再試行を始め、失敗が続く間は最大3600秒まで待機時間を倍増します。Claude Codeが終了コード0で終了してもTask状態が変化しなかった場合は、同じ再試行経路へ入ります。
+Claude CodeのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Token上限を検出した場合は1800秒、それ以外の失敗は常に300秒待って再試行します。Claude Codeが終了コード0で終了してもTask状態が変化しなかった場合は、通常エラーと同じ待機になります。
 
 待機時間は`.ralph/config.json`で変更できます。
 
@@ -113,12 +113,12 @@ Claude CodeのToken枯渇、利用量制限、その他の異常終了や、Wach
   "pollIntervalSeconds": 300,
   "retry": {
     "initialSeconds": 300,
-    "maxSeconds": 3600
+    "tokenLimitSeconds": 1800
   }
 }
 ```
 
-正常なTask状態変化または利用可能Taskがない状態を確認すると、再試行間隔は初期値へ戻ります。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
+`initialSeconds`は通常エラー、`tokenLimitSeconds`はToken上限検出時の固定待機時間です。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
 
 プロジェクト固有のPromptが必要な場合は、利用先にファイルを置き、ロール設定へプロジェクトルートからの相対パスを指定します。
 

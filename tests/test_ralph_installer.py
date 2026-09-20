@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -111,6 +112,10 @@ fi
 count=$((count + 1))
 printf '%s\\n' "$count" >"$RALPH_TEST_STATE_DIR/count"
 if (( count == 1 )); then
+  printf '%s\\n' "You've hit your limit · resets later" >&2
+  exit 42
+fi
+if (( count == 2 )); then
   exit 42
 fi
 touch "$RALPH_TEST_STATE_DIR/done"
@@ -142,7 +147,7 @@ exit 0
             config_path = target / ".ralph/config.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             config["pollIntervalSeconds"] = 1
-            config["retry"] = {"initialSeconds": 1, "maxSeconds": 1}
+            config["retry"] = {"initialSeconds": 1, "tokenLimitSeconds": 2}
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
             process = subprocess.Popen(
@@ -176,11 +181,17 @@ exit 0
             self.assertIn("Bash(git push)", settings["permissions"]["deny"])
             self.assertIn("wacha", settings["enabledMcpjsonServers"])
             self.assertEqual(1, settings["enabledMcpjsonServers"].count("wacha"))
-            self.assertTrue((Path(directory) / "done").exists())
-            self.assertEqual("2", (Path(directory) / "count").read_text(encoding="utf-8").strip())
+            self.assertTrue((Path(directory) / "done").exists(), f"stdout={stdout!r} stderr={stderr!r}")
+            self.assertEqual("3", (Path(directory) / "count").read_text(encoding="utf-8").strip())
             self.assertIn("Worker対象: todo=1", stdout)
+            self.assertIn("Token上限に達しました", stderr)
+            self.assertIn("2秒後に再試行", stderr)
             self.assertIn("終了コード 42", stderr)
             self.assertIn("1秒後に再試行", stderr)
+            timestamp_pattern = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+            self.assertTrue(all(timestamp_pattern.match(line) for line in stdout.splitlines()))
+            ralph_stderr = [line for line in stderr.splitlines() if not line.startswith("You've hit")]
+            self.assertTrue(all(timestamp_pattern.match(line) for line in ralph_stderr))
             requests = (Path(directory) / "requests").read_text(encoding="utf-8")
             self.assertIn('"availableFor":"work"', requests)
 
