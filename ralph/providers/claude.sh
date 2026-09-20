@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
-CLAUDE_BIN="$(jq -r '.claude.command // "claude"' "$RALPH_CONFIG_PATH")"
+CLAUDE_BIN="${RALPH_AGENT_COMMAND:-$(jq -r '.claude.command // "claude"' "$RALPH_CONFIG_PATH")}"
 CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS="$(jq -r '.claude.dangerouslySkipPermissions // false' "$RALPH_CONFIG_PATH")"
 
 provider_requirements() {
@@ -22,6 +22,10 @@ provider_run() {
   local project_root="$2"
   local error_log error_pipe provider_status tee_pid
   local -a args=(--verbose -p "$(<"$prompt_path")")
+
+  if [[ -n "${RALPH_AGENT_MODEL:-}" ]]; then
+    args=(--model "$RALPH_AGENT_MODEL" "${args[@]}")
+  fi
 
   if [[ -n "${PROVIDER_ERROR_LOG:-}" ]]; then
     rm -f "$PROVIDER_ERROR_LOG"

@@ -1,6 +1,6 @@
 # Ralph Runner
 
-WachaのTask状態を監視し、Claude CodeのWorkerまたはReviewerを1 Taskずつ使い捨てで起動するRunnerです。
+WachaのTask状態を監視し、Claude CodeまたはCodexのWorker・Reviewerを1 Taskずつ使い捨てで起動するRunnerです。
 
 ## 責務
 
@@ -9,7 +9,7 @@ WachaのTask状態を監視し、Claude CodeのWorkerまたはReviewerを1 Task�
 - Agent provider: Claude Codeなどの実行環境固有の起動処理
 - 利用先リポジトリ: プロジェクト固有の設定、仕様、知識
 
-現在対応している組み合わせはWachaとClaude Codeです。
+現在対応しているTask BackendはWacha、Agent ProviderはClaude CodeとCodexです。
 
 ## Globalインストール
 
@@ -26,14 +26,16 @@ python3 scripts/install_ralph.py --global
 ```bash
 cd /path/to/project
 ralph init
+# Codexを使う場合
+ralph init --agent-provider codex
 ```
 
-`ralph init`は次のRepo固有設定を作成または更新します。
+`ralph init`は次のRepo固有設定を作成または更新します。Claude用の2ファイルはClaude Provider選択時だけ作成します。
 
 ```text
 .ralph/config.json       RalphとWachaの設定
-.mcp.json                Claude CodeのWacha MCP接続設定
-.claude/settings.json    Wacha MCPの有効化とツール権限
+.mcp.json                Claude CodeのWacha MCP接続設定（Claudeのみ）
+.claude/settings.json    Wacha MCPの有効化とツール権限（Claudeのみ）
 ```
 
 既存の`.mcp.json`と`.claude/settings.json`がある場合は、Wacha関連だけをマージし、その他のMCPサーバー、権限、設定を保持します。JSONが壊れている場合や既存フィールドの型が不正な場合は上書きせずに終了します。
@@ -59,6 +61,7 @@ python3 scripts/install_ralph.py --target /path/to/project
     bin/ralph-loop
     backends/wacha.sh
     providers/claude.sh
+    providers/codex.sh
     prompts/
 ```
 
@@ -86,6 +89,48 @@ Claude Codeへ渡すAuthorizationヘッダーは`Bearer ${WACHA_AGENT_NAME}`で�
 }
 ```
 
+Codexを使う場合は`ralph init --agent-provider codex`で初期化するか、既存設定の`agentProvider`を`codex`へ変更します。既定では`workspace-write` Sandboxで実行します。
+
+```json
+{
+  "agentProvider": "codex",
+  "codex": {
+    "command": "codex",
+    "dangerouslyBypassApprovalsAndSandbox": false
+  }
+}
+```
+
+WorkerにGitコミットを含む完全な自律実行を許可する場合は、リポジトリを信頼できることを確認して`dangerouslyBypassApprovalsAndSandbox`を`true`にします。この設定ではCodexの承認とSandboxが無効になります。Codex ProviderはWacha MCPのURLと`WACHA_AGENT_NAME`を実行時設定として渡すため、`.codex/config.toml`への追記は不要です。
+
+WorkerとReviewerで異なるAgent Providerを使う場合は、Roleごとの`agentProvider`へ`claude`または`codex`を指定します。Role側の指定がトップレベルの`agentProvider`より優先され、未指定の場合だけトップレベルへフォールバックします。Roleごとの`command`はProvider共通の`command`より優先されます。`model`を省略または空文字にすると各CLIの既定モデルを使い、指定した場合はCLIの`--model`へそのまま渡します。
+
+```json
+{
+  "agentProvider": "claude",
+  "claude": {
+    "command": "claude"
+  },
+  "codex": {
+    "command": "codex"
+  },
+  "roles": {
+    "worker": {
+      "agentName": "worker-node-001",
+      "agentProvider": "codex",
+      "command": "codex",
+      "model": "gpt-5.6-terra"
+    },
+    "reviewer": {
+      "agentName": "reviewer-node-001",
+      "agentProvider": "claude",
+      "command": "claude",
+      "model": "sonnet"
+    }
+  }
+}
+```
+
 ## 実行
 
 Global版は利用先リポジトリのルートまたは配下で実行します。Gitリポジトリの場合はルートを自動検出します。
@@ -104,7 +149,7 @@ Repo-local版は次のように実行します。
 
 既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
 
-Claude CodeのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Token上限を検出した場合は1800秒、それ以外の失敗は常に300秒待って再試行します。Claude Codeが終了コード0で終了してもTask状態が変化しなかった場合は、通常エラーと同じ待機になります。
+Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Token上限を検出した場合は1800秒、それ以外の失敗は常に300秒待って再試行します。Agentが終了コード0で終了してもTask状態が変化しなかった場合は、通常エラーと同じ待機になります。
 
 待機時間は`.ralph/config.json`で変更できます。
 
@@ -119,6 +164,23 @@ Claude CodeのToken枯渇、利用量制限、その他の異常終了や、Wach
 ```
 
 `initialSeconds`は通常エラー、`tokenLimitSeconds`はToken上限検出時の固定待機時間です。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
+
+実行ログはコンソールへ表示しながら、プロジェクト共通の`.ralph/logs/ralph.log`へ追記します。各行には実行Role名が付きます。`.ralph/logs/`はGit管理対象外にしてください。
+
+```text
+[2026-09-20 10:00:00][worker] Worker対象: todo=1 available=1
+[2026-09-20 10:02:15][reviewer] Reviewer対象: in_review=1
+```
+
+保存先は設定で変更できます。プロジェクトルートからの相対パスまたは絶対パスを指定します。
+
+```json
+{
+  "logging": {
+    "path": ".ralph/logs/ralph.log"
+  }
+}
+```
 
 プロジェクト固有のPromptが必要な場合は、利用先にファイルを置き、ロール設定へプロジェクトルートからの相対パスを指定します。
 

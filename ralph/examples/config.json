@@ -7,6 +7,9 @@
     "initialSeconds": 300,
     "tokenLimitSeconds": 1800
   },
+  "logging": {
+    "path": ".ralph/logs/ralph.log"
+  },
   "wacha": {
     "url": "http://localhost:51743/mcp"
   },
@@ -14,12 +17,22 @@
     "command": "claude",
     "dangerouslySkipPermissions": true
   },
+  "codex": {
+    "command": "codex",
+    "dangerouslyBypassApprovalsAndSandbox": false
+  },
   "roles": {
     "worker": {
-      "agentName": "worker-node-001"
+      "agentName": "worker-node-001",
+      "agentProvider": "claude",
+      "command": "claude",
+      "model": ""
     },
     "reviewer": {
-      "agentName": "reviewer-node-001"
+      "agentName": "reviewer-node-001",
+      "agentProvider": "claude",
+      "command": "claude",
+      "model": ""
     }
   }
 }
