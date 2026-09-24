@@ -313,6 +313,76 @@ touch "$RALPH_TEST_STATE_DIR/done"
             self.assertIn(str(target.resolve()), prompt)
             self.assertIn("sample-project", prompt)
 
+    def test_idle_logging_suppresses_unchanged_poll_messages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sample-project"
+            bin_dir = Path(directory) / "bin"
+            target.mkdir()
+            bin_dir.mkdir()
+            launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
+
+            fake_curl = bin_dir / "curl"
+            fake_curl.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' request >>"$RALPH_TEST_STATE_DIR/idle-requests"
+if [[ "$*" == *'list_projects'* ]]; then
+  printf '%s\\n' '{"result":{"structuredContent":{"projects":[{"id":"project-1","name":"sample-project"}]}}}'
+else
+  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"todo":0,"rejected":0,"doing":0,"in_review":0}},"tasks":[]}}}'
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            fake_claude = bin_dir / "claude"
+            fake_claude.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            fake_claude.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["RALPH_TEST_STATE_DIR"] = directory
+            subprocess.run(
+                [str(launcher), "init"],
+                cwd=target,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            config_path = target / ".ralph/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["pollIntervalSeconds"] = 1
+            config["logging"]["idleHeartbeatSeconds"] = 2
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            process = subprocess.Popen(
+                [str(launcher), "run", "worker"],
+                cwd=target,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            log_path = target / ".ralph/logs/ralph.log"
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if log_path.exists() and "待機中です。" in log_path.read_text(encoding="utf-8"):
+                    break
+                time.sleep(0.05)
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=5)
+
+            self.assertEqual("", stderr)
+            log = log_path.read_text(encoding="utf-8")
+            self.assertEqual(1, log.count("待機を開始します。"), f"stdout={stdout!r}")
+            self.assertEqual(1, log.count("待機中です。"), f"stdout={stdout!r}")
+            self.assertNotIn("秒待機します。", log)
+            request_count = len(
+                (Path(directory) / "idle-requests").read_text(encoding="utf-8").splitlines()
+            )
+            self.assertGreaterEqual(request_count, 4)
+
     def test_init_rejects_invalid_claude_settings_without_overwriting_them(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"

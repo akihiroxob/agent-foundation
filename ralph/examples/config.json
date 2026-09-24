@@ -8,7 +8,8 @@
     "tokenLimitSeconds": 1800
   },
   "logging": {
-    "path": ".ralph/logs/ralph.log"
+    "path": ".ralph/logs/ralph.log",
+    "idleHeartbeatSeconds": 3600
   },
   "wacha": {
     "url": "http://localhost:51743/mcp"

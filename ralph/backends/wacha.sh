@@ -68,15 +68,21 @@ backend_get_task_summary() {
   }' <<<"$tasks"
 }
 
+backend_format_status() {
+  local role="$1"
+  local summary="$2"
+  if [[ "$role" == worker ]]; then
+    jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0)"' <<<"$summary"
+  else
+    jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0)"' <<<"$summary"
+  fi
+}
+
 backend_print_status() {
   local role="$1"
   local summary="$2"
   local status
-  if [[ "$role" == worker ]]; then
-    status="$(jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0)"' <<<"$summary")"
-  else
-    status="$(jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0)"' <<<"$summary")"
-  fi
+  status="$(backend_format_status "$role" "$summary")"
   ralph_log '%s\n' "$status"
 }
 

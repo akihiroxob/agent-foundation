@@ -177,10 +177,13 @@ Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、W
 ```json
 {
   "logging": {
-    "path": ".ralph/logs/ralph.log"
+    "path": ".ralph/logs/ralph.log",
+    "idleHeartbeatSeconds": 3600
   }
 }
 ```
+
+Taskがない場合もWachaの確認は`pollIntervalSeconds`間隔で継続しますが、同じ待機状態は毎回出力しません。待機開始、Task状態の変化、エラーは即時に記録し、状態が変わらない間は`idleHeartbeatSeconds`間隔で生存確認を1行だけ記録します。
 
 プロジェクト固有のPromptが必要な場合は、利用先にファイルを置き、ロール設定へプロジェクトルートからの相対パスを指定します。
 

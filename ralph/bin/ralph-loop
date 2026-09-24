@@ -152,6 +152,7 @@ fi
 POLL_INTERVAL_SECONDS="$(jq -er '.pollIntervalSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
 RETRY_INITIAL_SECONDS="$(jq -er '.retry.initialSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
 RETRY_TOKEN_LIMIT_SECONDS="$(jq -er '.retry.tokenLimitSeconds // 1800 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
+IDLE_HEARTBEAT_SECONDS="$(jq -er '.logging.idleHeartbeatSeconds // 3600 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
 WACHA_AGENT_NAME="$(config_string ".roles.${role}.agentName")"
 RALPH_AGENT_COMMAND="$(config_optional_string ".roles.${role}.command")"
 RALPH_AGENT_MODEL="$(config_optional_string ".roles.${role}.model")"
@@ -225,19 +226,37 @@ wait_before_retry() {
   sleep "$delay"
 }
 
+last_idle_log_epoch=0
+last_idle_summary=""
+
 while true; do
   if ! summary="$(backend_get_task_summary "$role")"; then
     wait_before_retry 'Wachaの状態取得に失敗しました。'
     continue
   fi
-  backend_print_status "$role" "$summary"
   pending="$(backend_pending_count "$role" "$summary")"
   if (( pending == 0 )); then
-    ralph_log '%sが処理するTaskがないため %d 秒待機します。\n' "$role" "$POLL_INTERVAL_SECONDS"
+    current_epoch="$(date +%s)"
+    normalized_summary="$(jq -cS . <<<"$summary")"
+    status="$(backend_format_status "$role" "$summary")"
+    if (( last_idle_log_epoch == 0 )); then
+      ralph_log '待機を開始します。%s 確認間隔=%d秒\n' "$status" "$POLL_INTERVAL_SECONDS"
+      last_idle_log_epoch="$current_epoch"
+    elif [[ "$normalized_summary" != "$last_idle_summary" ]]; then
+      ralph_log '待機中にTask状態が変化しました。%s\n' "$status"
+      last_idle_log_epoch="$current_epoch"
+    elif (( current_epoch - last_idle_log_epoch >= IDLE_HEARTBEAT_SECONDS )); then
+      ralph_log '待機中です。%s\n' "$status"
+      last_idle_log_epoch="$current_epoch"
+    fi
+    last_idle_summary="$normalized_summary"
     sleep "$POLL_INTERVAL_SECONDS"
     continue
   fi
 
+  last_idle_log_epoch=0
+  last_idle_summary=""
+  backend_print_status "$role" "$summary"
   ralph_log '%sを起動します。\n' "$role"
   if provider_run "$rendered_prompt" "$PROJECT_ROOT"; then
     provider_status=0
