@@ -264,8 +264,16 @@ while true; do
     provider_status=$?
   fi
   if (( provider_status != 0 )); then
+    PROVIDER_TOKEN_LIMIT_RESET_PARSED=false
+    PROVIDER_TOKEN_LIMIT_RETRY_SECONDS=""
     if provider_hit_token_limit; then
-      wait_before_retry "${role}がToken上限に達しました。" "$RETRY_TOKEN_LIMIT_SECONDS"
+      if [[ "$PROVIDER_TOKEN_LIMIT_RESET_PARSED" == true ]]; then
+        wait_before_retry \
+          "${role}がToken上限に達しました。Reset時刻を検出しました。" \
+          "$PROVIDER_TOKEN_LIMIT_RETRY_SECONDS"
+      else
+        wait_before_retry "${role}がToken上限に達しました。" "$RETRY_TOKEN_LIMIT_SECONDS"
+      fi
     else
       wait_before_retry "${role}が終了コード ${provider_status} で終了しました。"
     fi

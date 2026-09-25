@@ -115,7 +115,7 @@ count=$((count + 1))
 printf '%s\\n' "$count" >"$RALPH_TEST_STATE_DIR/count"
 printf '%s\\n' "$@" >"$RALPH_TEST_STATE_DIR/claude-args"
 if (( count == 1 )); then
-  printf '%s\\n' "You've hit your limit · resets later" >&2
+  printf '%s\\n' "You've hit your limit · resets later"
   exit 42
 fi
 if (( count == 2 )); then
@@ -207,6 +207,66 @@ exit 0
             self.assertEqual("test-claude-model", claude_args[model_index + 1])
             requests = (Path(directory) / "requests").read_text(encoding="utf-8")
             self.assertIn('"availableFor":"work"', requests)
+
+    def test_claude_provider_uses_reset_time_from_limit_message(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.json"
+            output_log = root / "stdout.log"
+            error_log = root / "stderr.log"
+            config_path.write_text('{"claude": {}}\n', encoding="utf-8")
+
+            reset_time = subprocess.run(
+                [
+                    "python3",
+                    "-c",
+                    (
+                        "from datetime import datetime, timedelta; "
+                        "from zoneinfo import ZoneInfo; "
+                        "print((datetime.now(ZoneInfo('Asia/Tokyo')) + timedelta(minutes=2))"
+                        ".strftime('%I:%M%p').lstrip('0').lower())"
+                    ),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            output_log.write_text(
+                f"You've hit your session limit · resets {reset_time} (Asia/Tokyo)\n",
+                encoding="utf-8",
+            )
+            error_log.write_text("", encoding="utf-8")
+
+            script = """
+set -euo pipefail
+RALPH_CONFIG_PATH="$1"
+RALPH_AGENT_COMMAND=""
+source "$2"
+PROVIDER_OUTPUT_LOG="$3"
+PROVIDER_ERROR_LOG="$4"
+provider_hit_token_limit
+printf '%s\\n%s\\n' "$PROVIDER_TOKEN_LIMIT_RESET_PARSED" "$PROVIDER_TOKEN_LIMIT_RETRY_SECONDS"
+"""
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "bash",
+                    str(config_path),
+                    str(ROOT / "ralph/providers/claude.sh"),
+                    str(output_log),
+                    str(error_log),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            parsed, retry_seconds = result.stdout.splitlines()
+            self.assertEqual("true", parsed)
+            self.assertGreaterEqual(int(retry_seconds), 60)
+            self.assertLessEqual(int(retry_seconds), 180)
 
     def test_codex_provider_runs_with_wacha_mcp_configuration(self):
         with tempfile.TemporaryDirectory() as directory:

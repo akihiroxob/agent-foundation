@@ -23,8 +23,14 @@ class DangerousCommandHookTest(unittest.TestCase):
         result = run_hook(command)
         self.assertEqual(0, result.returncode)
         response = json.loads(result.stdout)
-        self.assertFalse(response["continue"])
-        self.assertIn("using its captured PID", response["stopReason"])
+        self.assertNotIn("continue", response)
+        hook_output = response["hookSpecificOutput"]
+        self.assertEqual("PreToolUse", hook_output["hookEventName"])
+        self.assertEqual("deny", hook_output["permissionDecision"])
+        self.assertIn(
+            "using its captured PID",
+            hook_output["permissionDecisionReason"],
+        )
 
     def assert_allowed(self, command: str) -> None:
         result = run_hook(command)

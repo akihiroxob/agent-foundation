@@ -27,12 +27,16 @@ command = str(payload.get("tool_input", {}).get("command", ""))
 if any(fragment in command for fragment in BLOCKED) or any(
     pattern.search(command) for pattern in PROCESS_WIDE_TERMINATION
 ):
+    reason = (
+        f"Blocked dangerous command: {command}. "
+        "Stop only a verification process started by this Agent, using its captured PID."
+    )
     print(json.dumps({
-        "continue": False,
-        "stopReason": (
-            f"Blocked dangerous command: {command}. "
-            "Stop only a verification process started by this Agent, using its captured PID."
-        ),
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        },
     }))
 
 sys.exit(0)

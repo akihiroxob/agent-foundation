@@ -149,7 +149,7 @@ Repo-local版は次のように実行します。
 
 既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
 
-Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Token上限を検出した場合は1800秒、それ以外の失敗は常に300秒待って再試行します。Agentが終了コード0で終了してもTask状態が変化しなかった場合は、通常エラーと同じ待機になります。
+Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Claudeの上限メッセージから`resets 11:20pm (Asia/Tokyo)`形式のReset時刻を取得できた場合は、その時刻の60秒後まで待機します。時刻を取得・解釈できない場合は1800秒、それ以外の失敗は常に300秒待って再試行します。Agentが終了コード0で終了してもTask状態が変化しなかった場合は、通常エラーと同じ待機になります。
 
 待機時間は`.ralph/config.json`で変更できます。
 
@@ -163,7 +163,7 @@ Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、W
 }
 ```
 
-`initialSeconds`は通常エラー、`tokenLimitSeconds`はToken上限検出時の固定待機時間です。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
+`initialSeconds`は通常エラー、`tokenLimitSeconds`はToken上限メッセージからReset時刻を取得できなかった場合のフォールバック待機時間です。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
 
 実行ログはコンソールへ表示しながら、プロジェクト共通の`.ralph/logs/ralph.log`へ追記します。各行には実行Role名が付きます。`.ralph/logs/`はGit管理対象外にしてください。
 
