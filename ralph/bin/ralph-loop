@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Worker または Reviewer を1実行ずつ起動し、対象Taskがなくなるまで監視する。
+# 各Roleを1実行ずつ起動し、対象Taskがなくなるまで監視する。
 set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-使い方: ralph-loop [--config PATH] <worker|reviewer>
+使い方: ralph-loop [--config PATH] <worker|reviewer|manager>
 EOF
   exit 1
 }
@@ -95,7 +95,7 @@ fi
 
 role="${1:-}"
 case "$role" in
-  worker | reviewer) ;;
+  worker | reviewer | manager) ;;
   *) usage ;;
 esac
 [[ $# -eq 1 ]] || usage

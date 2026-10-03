@@ -158,7 +158,7 @@ def run_command(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ralph", description="Run disposable Worker and Reviewer agents.")
+    parser = argparse.ArgumentParser(prog="ralph", description="Run disposable Worker, Reviewer, and Manager agents.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="Create repository-specific Ralph configuration.")
@@ -168,8 +168,8 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--force", action="store_true")
     init_parser.set_defaults(handler=init_command)
 
-    run_parser = subparsers.add_parser("run", help="Run a Worker or Reviewer loop.")
-    run_parser.add_argument("role", choices=("worker", "reviewer"))
+    run_parser = subparsers.add_parser("run", help="Run a Worker, Reviewer, or Manager loop.")
+    run_parser.add_argument("role", choices=("worker", "reviewer", "manager"))
     run_parser.add_argument("--project-root", type=Path)
     run_parser.add_argument("--config", type=Path)
     run_parser.set_defaults(handler=run_command)

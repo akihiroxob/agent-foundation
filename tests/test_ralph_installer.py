@@ -27,8 +27,10 @@ class RalphInstallerTest(unittest.TestCase):
             self.assertTrue((target / ".ralph/runtime/providers/claude.sh").is_file())
             self.assertTrue((target / ".ralph/runtime/providers/codex.sh").is_file())
             self.assertTrue((target / ".ralph/runtime/prompts/worker.md").is_file())
+            self.assertTrue((target / ".ralph/runtime/prompts/manager.md").is_file())
             config = json.loads((target / ".ralph/config.json").read_text(encoding="utf-8"))
             self.assertEqual("sample-project", config["projectName"])
+            self.assertEqual("manager-node-001", config["roles"]["manager"]["agentName"])
             mcp_config = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))
             self.assertEqual("http", mcp_config["mcpServers"]["wacha"]["type"])
             settings = json.loads((target / ".claude/settings.json").read_text(encoding="utf-8"))
@@ -69,6 +71,80 @@ class RalphInstallerTest(unittest.TestCase):
             ROOT / "ralph/providers/codex.sh",
         ]
         subprocess.run(["bash", "-n", *map(str, shell_files)], check=True)
+
+    def test_manager_runs_only_for_unclaimed_wait_accept_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sample-project"
+            bin_dir = Path(directory) / "bin"
+            target.mkdir()
+            bin_dir.mkdir()
+            launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
+
+            fake_curl = bin_dir / "curl"
+            fake_curl.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$RALPH_TEST_STATE_DIR/requests"
+if [[ "$*" == *'list_projects'* ]]; then
+  printf '%s\\n' '{"result":{"structuredContent":{"projects":[{"id":"project-1","name":"sample-project"}]}}}'
+elif [[ -f "$RALPH_TEST_STATE_DIR/ready" ]]; then
+  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"in_review":1,"wait_accept":1}},"tasks":[{"id":"review-1","status":"in_review"},{"id":"accept-1","status":"wait_accept"}]}}}'
+else
+  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"in_review":1,"wait_accept":1}},"tasks":[{"id":"review-1","status":"in_review"}]}}}'
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            fake_claude = bin_dir / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' "$WACHA_AGENT_NAME" >"$RALPH_TEST_STATE_DIR/agent-name"
+printf '%s\\n' "$@" >"$RALPH_TEST_STATE_DIR/claude-args"
+touch "$RALPH_TEST_STATE_DIR/started"
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["RALPH_TEST_STATE_DIR"] = directory
+            subprocess.run([str(launcher), "init"], cwd=target, env=environment, check=True, capture_output=True)
+            config_path = target / ".ralph/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["pollIntervalSeconds"] = 1
+            config["retry"]["initialSeconds"] = 1
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            process = subprocess.Popen(
+                [str(launcher), "run", "manager"],
+                cwd=target,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not (Path(directory) / "requests").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                log_path = target / ".ralph/logs/ralph.log"
+                while (not log_path.exists() or "待機を開始します" not in log_path.read_text(encoding="utf-8")) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse((Path(directory) / "started").exists())
+                (Path(directory) / "ready").touch()
+                while not (Path(directory) / "started").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            finally:
+                process.terminate()
+                stdout, stderr = process.communicate(timeout=5)
+
+            self.assertTrue((Path(directory) / "started").exists(), f"stdout={stdout!r} stderr={stderr!r}")
+            self.assertIn("Manager対象: wait_accept=1 available=1", stdout)
+            self.assertEqual("manager-node-001", (Path(directory) / "agent-name").read_text().strip())
+            requests = (Path(directory) / "requests").read_text(encoding="utf-8")
+            self.assertIn('"availableFor":"acceptance"', requests)
+            self.assertNotIn('"limit":1', requests)
 
     def test_global_cli_initializes_and_runs_project(self):
         with tempfile.TemporaryDirectory() as directory:

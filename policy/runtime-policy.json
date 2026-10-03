@@ -47,7 +47,13 @@
         "edit_story",
         "list_task_comments",
         "reviewed_task",
-        "reject_task"
+        "reject_task",
+        "get_skill_context",
+        "list_changes",
+        "claim_acceptance",
+        "accept_task",
+        "renew_claim",
+        "release_claim"
       ]
     }
   },

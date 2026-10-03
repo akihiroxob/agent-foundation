@@ -63,7 +63,7 @@ Runtime設定は、当面はこのリポジトリをcloneして生成した`dist
 
 ## Ralph Runner
 
-WachaのTaskを監視し、Claude CodeのWorkerまたはReviewerを使い捨てで起動するRunnerを同梱しています。
+WachaのTaskを監視し、Claude CodeまたはCodexのWorker、Reviewer、最終受入専用Managerを使い捨てで起動するRunnerを同梱しています。
 
 ```bash
 python3 scripts/install_ralph.py --global
@@ -71,6 +71,7 @@ cd /path/to/project
 ralph init
 ralph run worker
 ralph run reviewer
+ralph run manager
 ```
 
 Runnerを利用先に固定する場合は`python3 scripts/install_ralph.py --target /path/to/project`を使用できます。詳細は[`ralph/README.md`](ralph/README.md)を参照してください。利用先の`.ralph/config.json`は再インストール時にも保持されます。
