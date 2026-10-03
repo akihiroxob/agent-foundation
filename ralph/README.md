@@ -66,6 +66,7 @@ python3 scripts/install_ralph.py --target /path/to/project
 ```
 
 既存の`.ralph/config.json`は上書きしません。Repo-localのRunner本体を更新する場合は、同じコマンドを再実行します。
+以前に作成した設定に`roles.manager`がない場合は、上記の設定例を参考に追加してください。自動実行には3つのRoleそれぞれの`agentName`と、Wacha上のRole権限が必要です。
 
 ## 設定
 
@@ -103,7 +104,7 @@ Codexを使う場合は`ralph init --agent-provider codex`で初期化するか�
 
 WorkerにGitコミットを含む完全な自律実行を許可する場合は、リポジトリを信頼できることを確認して`dangerouslyBypassApprovalsAndSandbox`を`true`にします。この設定ではCodexの承認とSandboxが無効になります。Codex ProviderはWacha MCPのURLと`WACHA_AGENT_NAME`を実行時設定として渡すため、`.codex/config.toml`への追記は不要です。
 
-Roleごとに異なるAgent Providerを使う場合は、各`agentProvider`へ`claude`または`codex`を指定します。Role側の指定がトップレベルの`agentProvider`より優先され、未指定の場合だけトップレベルへフォールバックします。Roleごとの`command`はProvider共通の`command`より優先されます。`model`を省略または空文字にすると各CLIの既定モデルを使い、指定した場合はCLIの`--model`へそのまま渡します。
+`agentProvider`は起動方式、`claude.command`と`codex.command`は各CLIの実行ファイルです。`ralph init`は全Roleに選択した`agentProvider`を設定します。Role側の値がトップレベルより優先されるため、後からProviderを切り替える場合は対象Roleの値を変更してください。Roleの`command`は専用の実行ファイルやラッパーが必要な場合だけ指定し、選んだProviderの`command`より優先されます。`model`を省略または空文字にすると各CLIの既定モデルを使い、指定した場合はCLIの`--model`へそのまま渡します。以前に作成した設定でRoleの`command`が不要なら削除できます。
 
 ```json
 {
@@ -118,19 +119,16 @@ Roleごとに異なるAgent Providerを使う場合は、各`agentProvider`へ`c
     "worker": {
       "agentName": "worker-node-001",
       "agentProvider": "codex",
-      "command": "codex",
       "model": "gpt-5.6-terra"
     },
     "reviewer": {
       "agentName": "reviewer-node-001",
       "agentProvider": "claude",
-      "command": "claude",
       "model": "sonnet"
     },
     "manager": {
       "agentName": "manager-node-001",
       "agentProvider": "claude",
-      "command": "claude",
       "model": "sonnet"
     }
   }
@@ -142,6 +140,14 @@ Roleごとに異なるAgent Providerを使う場合は、各`agentProvider`へ`c
 Global版は利用先リポジトリのルートまたは配下で実行します。Gitリポジトリの場合はルートを自動検出します。
 
 ```bash
+ralph run
+```
+
+`ralph run`は1プロセスでManagerの最終受入、Reviewerのコードレビュー、Workerの差し戻し対応、Workerの次の開発をこの順に判断します。各Agentは従来どおり1回にTaskを最大1件だけ処理します。差し戻しが複数ある場合、Worker自身が対象を選びます。
+
+Roleごとに実行する場合は次を使います。
+
+```bash
 ralph run worker
 ralph run reviewer
 ralph run manager
@@ -150,12 +156,18 @@ ralph run manager
 Repo-local版は次のように実行します。
 
 ```bash
+./.ralph/runtime/bin/ralph run
+```
+
+Roleごとに実行する場合は次を使います。
+
+```bash
 ./.ralph/runtime/bin/ralph run worker
 ./.ralph/runtime/bin/ralph run reviewer
 ./.ralph/runtime/bin/ralph run manager
 ```
 
-既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Managerは`availableFor: acceptance`のうち、Reviewerを通過した`wait_accept`だけを対象にします。`in_review`の直接受入やStory管理は行いません。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
+既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Managerは`availableFor: acceptance`のうち、Reviewerを通過した`wait_accept`だけを対象にします。`in_review`の直接受入やStory管理は行いません。自動実行でWorkerを選ぶ際は、利用可能な`rejected`があれば新規Taskより先に対応するようPromptで指示します。対象一覧に`limit`は指定せず、個別のTaskはAgentが選びます。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
 
 Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Claudeの上限メッセージから`resets 11:20pm (Asia/Tokyo)`形式のReset時刻を取得できた場合は、その時刻の60秒後まで待機します。時刻を取得・解釈できない場合は1800秒、それ以外の失敗は常に300秒待って再試行します。Agentが終了コード0で終了してもTask状態が変化しなかった場合は、通常エラーと同じ待機になります。
 

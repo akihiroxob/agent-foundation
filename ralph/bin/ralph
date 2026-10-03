@@ -39,12 +39,9 @@ def initialize_project(
     config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
     config["projectName"] = project_name or root.name
     config["agentProvider"] = agent_provider
-    provider_config = config.get(agent_provider, {})
-    default_command = provider_config.get("command", agent_provider)
     for role_config in config.get("roles", {}).values():
         if isinstance(role_config, dict):
             role_config["agentProvider"] = agent_provider
-            role_config["command"] = default_command
     config_path.parent.mkdir(exist_ok=True)
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return config_path, True
@@ -168,8 +165,8 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--force", action="store_true")
     init_parser.set_defaults(handler=init_command)
 
-    run_parser = subparsers.add_parser("run", help="Run a Worker, Reviewer, or Manager loop.")
-    run_parser.add_argument("role", choices=("worker", "reviewer", "manager"))
+    run_parser = subparsers.add_parser("run", help="Run the priority loop or one role loop.")
+    run_parser.add_argument("role", nargs="?", choices=("auto", "worker", "reviewer", "manager"), default="auto")
     run_parser.add_argument("--project-root", type=Path)
     run_parser.add_argument("--config", type=Path)
     run_parser.set_defaults(handler=run_command)

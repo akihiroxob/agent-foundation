@@ -58,26 +58,16 @@ backend_get_task_summary() {
     exit 1
   }
 
-  if [[ "$role" == manager ]]; then
-    # Wachaのacceptance候補にはin_reviewも含まれるため、全候補からwait_acceptだけを数える。
-    tasks="$(mcp_call 'list_tasks' "$(jq -cn \
-      --arg project_id "$project_id" \
-      --arg availability "$availability" \
-      '{projectId: $project_id, filter: {availableFor: $availability}}')")"
-    jq -e '{
-      byStatus: .result.structuredContent.summary.byStatus,
-      availableCount: ((.result.structuredContent.tasks // []) | map(select(.status == "wait_accept")) | length)
-    }' <<<"$tasks"
-  else
-    tasks="$(mcp_call 'list_tasks' "$(jq -cn \
-      --arg project_id "$project_id" \
-      --arg availability "$availability" \
-      '{projectId: $project_id, filter: {availableFor: $availability}, limit: 1}')")"
-    jq -e '{
-      byStatus: .result.structuredContent.summary.byStatus,
-      availableCount: ((.result.structuredContent.tasks // []) | length)
-    }' <<<"$tasks"
-  fi
+  tasks="$(mcp_call 'list_tasks' "$(jq -cn \
+    --arg project_id "$project_id" \
+    --arg availability "$availability" \
+    '{projectId: $project_id, filter: {availableFor: $availability}}')")"
+  # Wachaのacceptance候補にはin_reviewも含まれる。Managerはwait_acceptだけを対象にする。
+  jq -e --arg role "$role" '{
+    byStatus: .result.structuredContent.summary.byStatus,
+    availableCount: ((.result.structuredContent.tasks // []) | map(select($role != "manager" or .status == "wait_accept")) | length),
+    availableRejected: ((.result.structuredContent.tasks // []) | map(select(.status == "rejected")) | length)
+  }' <<<"$tasks"
 }
 
 backend_format_status() {

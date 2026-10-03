@@ -69,9 +69,7 @@ WachaのTaskを監視し、Claude CodeまたはCodexのWorker、Reviewer、最�
 python3 scripts/install_ralph.py --global
 cd /path/to/project
 ralph init
-ralph run worker
-ralph run reviewer
-ralph run manager
+ralph run
 ```
 
 Runnerを利用先に固定する場合は`python3 scripts/install_ralph.py --target /path/to/project`を使用できます。詳細は[`ralph/README.md`](ralph/README.md)を参照してください。利用先の`.ralph/config.json`は再インストール時にも保持されます。

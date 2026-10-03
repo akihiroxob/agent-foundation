@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-使い方: ralph-loop [--config PATH] <worker|reviewer|manager>
+使い方: ralph-loop [--config PATH] <auto|worker|reviewer|manager>
 EOF
   exit 1
 }
@@ -14,6 +14,7 @@ RALPH_LOG_FILE=""
 RALPH_LOG_PIPE_DIR=""
 RALPH_LOG_STDOUT_PID=""
 RALPH_LOG_STDERR_PID=""
+RALPH_LOG_ROLE_FILE=""
 
 ralph_log() {
   local format="$1"
@@ -32,10 +33,11 @@ ralph_log_error() {
 
 ralph_log_stream() {
   local output_fd="$1"
-  local line formatted
+  local line formatted log_role
   while IFS= read -r line || [[ -n "$line" ]]; do
+    log_role="$(<"$RALPH_LOG_ROLE_FILE")"
     printf -v formatted '[%s][%s] %s\n' \
-      "$(date '+%Y-%m-%d %H:%M:%S')" "$role" "$line"
+      "$(date '+%Y-%m-%d %H:%M:%S')" "$log_role" "$line"
     printf '%s' "$formatted" >&"$output_fd"
     printf '%s' "$formatted" >>"$RALPH_LOG_FILE"
   done
@@ -59,6 +61,8 @@ setup_logging() {
   umask "$previous_umask"
 
   RALPH_LOG_PIPE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ralph-log.XXXXXX")"
+  RALPH_LOG_ROLE_FILE="$RALPH_LOG_PIPE_DIR/role"
+  printf '%s' "$role" >"$RALPH_LOG_ROLE_FILE"
   stdout_pipe="$RALPH_LOG_PIPE_DIR/stdout"
   stderr_pipe="$RALPH_LOG_PIPE_DIR/stderr"
   mkfifo "$stdout_pipe" "$stderr_pipe"
@@ -79,7 +83,7 @@ cleanup_logging() {
   exec 3>&- 4>&-
   wait "$RALPH_LOG_STDOUT_PID" 2>/dev/null || true
   wait "$RALPH_LOG_STDERR_PID" 2>/dev/null || true
-  rm -f "$RALPH_LOG_PIPE_DIR/stdout" "$RALPH_LOG_PIPE_DIR/stderr"
+  rm -f "$RALPH_LOG_PIPE_DIR/stdout" "$RALPH_LOG_PIPE_DIR/stderr" "$RALPH_LOG_ROLE_FILE"
   rmdir "$RALPH_LOG_PIPE_DIR"
 }
 
@@ -93,12 +97,13 @@ if [[ "${1:-}" == "--config" ]]; then
   shift 2
 fi
 
-role="${1:-}"
-case "$role" in
-  worker | reviewer | manager) ;;
+mode="${1:-}"
+case "$mode" in
+  auto | worker | reviewer | manager) ;;
   *) usage ;;
 esac
 [[ $# -eq 1 ]] || usage
+role="$mode"
 
 if [[ -z "$CONFIG_PATH" ]]; then
   CONFIG_PATH="$PWD/.ralph/config.json"
@@ -145,25 +150,13 @@ fi
 
 RALPH_PROJECT_NAME="$(config_string '.projectName')"
 TASK_BACKEND="$(config_string '.taskBackend')"
-AGENT_PROVIDER="$(config_optional_string ".roles.${role}.agentProvider")"
-if [[ -z "$AGENT_PROVIDER" ]]; then
-  AGENT_PROVIDER="$(config_string '.agentProvider')"
-fi
 POLL_INTERVAL_SECONDS="$(jq -er '.pollIntervalSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
 RETRY_INITIAL_SECONDS="$(jq -er '.retry.initialSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
 RETRY_TOKEN_LIMIT_SECONDS="$(jq -er '.retry.tokenLimitSeconds // 1800 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
 IDLE_HEARTBEAT_SECONDS="$(jq -er '.logging.idleHeartbeatSeconds // 3600 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
-WACHA_AGENT_NAME="$(config_string ".roles.${role}.agentName")"
-RALPH_AGENT_COMMAND="$(config_optional_string ".roles.${role}.command")"
-RALPH_AGENT_MODEL="$(config_optional_string ".roles.${role}.model")"
-PROMPT_PATH="$(config_optional_string ".roles.${role}.prompt")"
-
 export RALPH_CONFIG_PATH="$CONFIG_PATH"
 export RALPH_PROJECT_NAME
 export RALPH_PROJECT_ROOT="$PROJECT_ROOT"
-export WACHA_AGENT_NAME
-export RALPH_AGENT_COMMAND
-export RALPH_AGENT_MODEL
 
 case "$TASK_BACKEND" in
   wacha) source "$RALPH_ROOT/backends/wacha.sh" ;;
@@ -172,25 +165,6 @@ case "$TASK_BACKEND" in
     exit 1
     ;;
 esac
-
-case "$AGENT_PROVIDER" in
-  claude) source "$RALPH_ROOT/providers/claude.sh" ;;
-  codex) source "$RALPH_ROOT/providers/codex.sh" ;;
-  *)
-    ralph_log_error '未対応のagentProviderです: %s\n' "$AGENT_PROVIDER"
-    exit 1
-    ;;
-esac
-
-if [[ -z "$PROMPT_PATH" ]]; then
-  PROMPT_PATH="$RALPH_ROOT/prompts/$role.md"
-elif [[ "$PROMPT_PATH" != /* ]]; then
-  PROMPT_PATH="$PROJECT_ROOT/$PROMPT_PATH"
-fi
-[[ -f "$PROMPT_PATH" ]] || {
-  ralph_log_error 'Promptが見つかりません: %s\n' "$PROMPT_PATH"
-  exit 1
-}
 
 setup_logging
 rendered_prompt=""
@@ -207,17 +181,97 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 rendered_prompt="$(mktemp "${TMPDIR:-/tmp}/ralph-prompt.XXXXXX")"
-ralph_log 'Ralphを開始します。provider=%s role=%s command=%s model=%s log=%s\n' \
-  "$AGENT_PROVIDER" "$role" "${RALPH_AGENT_COMMAND:-default}" \
-  "${RALPH_AGENT_MODEL:-default}" "$RALPH_LOG_FILE"
-
-prompt_content="$(<"$PROMPT_PATH")"
-prompt_content="${prompt_content//\{\{PROJECT_NAME\}\}/$RALPH_PROJECT_NAME}"
-prompt_content="${prompt_content//\{\{PROJECT_ROOT\}\}/$PROJECT_ROOT}"
-printf '%s\n' "$prompt_content" >"$rendered_prompt"
-
 backend_requirements
-provider_requirements
+
+set_log_role() {
+  printf '%s' "$role" >"$RALPH_LOG_ROLE_FILE"
+}
+
+set_role_identity() {
+  if ! WACHA_AGENT_NAME="$(config_string ".roles.${1}.agentName")"; then
+    ralph_log_error 'roles.%s.agentNameを設定してください: %s\n' "$1" "$CONFIG_PATH"
+    exit 1
+  fi
+  export WACHA_AGENT_NAME
+}
+
+prepare_role() {
+  local selected_role="$1"
+  local priority_status="${2:-}"
+  local prompt_path prompt_content
+  role="$selected_role"
+  set_log_role
+  set_role_identity "$role"
+  AGENT_PROVIDER="$(config_optional_string ".roles.${role}.agentProvider")"
+  if [[ -z "$AGENT_PROVIDER" ]]; then
+    AGENT_PROVIDER="$(config_string '.agentProvider')"
+  fi
+  RALPH_AGENT_COMMAND="$(config_optional_string ".roles.${role}.command")"
+  RALPH_AGENT_MODEL="$(config_optional_string ".roles.${role}.model")"
+  export RALPH_AGENT_COMMAND RALPH_AGENT_MODEL
+  case "$AGENT_PROVIDER" in
+    claude) source "$RALPH_ROOT/providers/claude.sh" ;;
+    codex) source "$RALPH_ROOT/providers/codex.sh" ;;
+    *)
+      ralph_log_error '未対応のagentProviderです: %s\n' "$AGENT_PROVIDER"
+      exit 1
+      ;;
+  esac
+  prompt_path="$(config_optional_string ".roles.${role}.prompt")"
+  if [[ -z "$prompt_path" ]]; then
+    prompt_path="$RALPH_ROOT/prompts/$role.md"
+  elif [[ "$prompt_path" != /* ]]; then
+    prompt_path="$PROJECT_ROOT/$prompt_path"
+  fi
+  [[ -f "$prompt_path" ]] || {
+    ralph_log_error 'Promptが見つかりません: %s\n' "$prompt_path"
+    exit 1
+  }
+  prompt_content="$(<"$prompt_path")"
+  prompt_content="${prompt_content//\{\{PROJECT_NAME\}\}/$RALPH_PROJECT_NAME}"
+  prompt_content="${prompt_content//\{\{PROJECT_ROOT\}\}/$PROJECT_ROOT}"
+  printf '%s\n' "$prompt_content" >"$rendered_prompt"
+  if [[ "$priority_status" == rejected ]]; then
+    printf '\n今回の自動実行では、利用可能な`rejected` Taskを優先して1件選んでください。Task IDは自分で選び、以降は通常のWorker手順に従ってください。\n' >>"$rendered_prompt"
+  fi
+  provider_requirements
+}
+
+select_auto_role() {
+  local candidate candidate_summary pending
+  local manager_summary reviewer_summary worker_summary
+  role=auto
+  set_log_role
+  for candidate in manager reviewer worker; do
+    set_role_identity "$candidate"
+    candidate_summary="$(backend_get_task_summary "$candidate")" || return 1
+    case "$candidate" in
+      manager) manager_summary="$candidate_summary" ;;
+      reviewer) reviewer_summary="$candidate_summary" ;;
+      worker) worker_summary="$candidate_summary" ;;
+    esac
+    pending="$(backend_pending_count "$candidate" "$candidate_summary")"
+    if (( pending > 0 )); then
+      role="$candidate"
+      set_log_role
+      summary="$candidate_summary"
+      return 0
+    fi
+  done
+  role=auto
+  summary="$(jq -cn --argjson manager "$manager_summary" \
+    --argjson reviewer "$reviewer_summary" --argjson worker "$worker_summary" \
+    '{manager: $manager, reviewer: $reviewer, worker: $worker}')"
+}
+
+if [[ "$mode" == auto ]]; then
+  ralph_log 'Ralphを開始します。mode=auto log=%s\n' "$RALPH_LOG_FILE"
+else
+  prepare_role "$mode"
+  ralph_log 'Ralphを開始します。provider=%s role=%s command=%s model=%s log=%s\n' \
+    "$AGENT_PROVIDER" "$role" "${RALPH_AGENT_COMMAND:-default}" \
+    "${RALPH_AGENT_MODEL:-default}" "$RALPH_LOG_FILE"
+fi
 
 wait_before_retry() {
   local reason="$1"
@@ -230,15 +284,30 @@ last_idle_log_epoch=0
 last_idle_summary=""
 
 while true; do
-  if ! summary="$(backend_get_task_summary "$role")"; then
+  if [[ "$mode" == auto ]]; then
+    if ! select_auto_role; then
+      wait_before_retry 'Wachaの状態取得に失敗しました。'
+      continue
+    fi
+    if [[ "$role" == auto ]]; then
+      pending=0
+    else
+      pending="$(backend_pending_count "$role" "$summary")"
+    fi
+  elif ! summary="$(backend_get_task_summary "$role")"; then
     wait_before_retry 'Wachaの状態取得に失敗しました。'
     continue
+  else
+    pending="$(backend_pending_count "$role" "$summary")"
   fi
-  pending="$(backend_pending_count "$role" "$summary")"
   if (( pending == 0 )); then
     current_epoch="$(date +%s)"
     normalized_summary="$(jq -cS . <<<"$summary")"
-    status="$(backend_format_status "$role" "$summary")"
+    if [[ "$mode" == auto ]]; then
+      status='自動実行対象なし'
+    else
+      status="$(backend_format_status "$role" "$summary")"
+    fi
     if (( last_idle_log_epoch == 0 )); then
       ralph_log '待機を開始します。%s 確認間隔=%d秒\n' "$status" "$POLL_INTERVAL_SECONDS"
       last_idle_log_epoch="$current_epoch"
@@ -256,6 +325,13 @@ while true; do
 
   last_idle_log_epoch=0
   last_idle_summary=""
+  if [[ "$mode" == auto ]]; then
+    priority_status=""
+    if [[ "$role" == worker && "$(jq -r '.availableRejected' <<<"$summary")" -gt 0 ]]; then
+      priority_status=rejected
+    fi
+    prepare_role "$role" "$priority_status"
+  fi
   backend_print_status "$role" "$summary"
   ralph_log '%sを起動します。\n' "$role"
   if provider_run "$rendered_prompt" "$PROJECT_ROOT"; then
