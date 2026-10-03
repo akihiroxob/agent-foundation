@@ -27,8 +27,14 @@ class RalphInstallerTest(unittest.TestCase):
             self.assertTrue((target / ".ralph/runtime/providers/claude.sh").is_file())
             self.assertTrue((target / ".ralph/runtime/providers/codex.sh").is_file())
             self.assertTrue((target / ".ralph/runtime/prompts/worker.md").is_file())
+            self.assertTrue((target / ".ralph/runtime/prompts/manager.md").is_file())
             config = json.loads((target / ".ralph/config.json").read_text(encoding="utf-8"))
             self.assertEqual("sample-project", config["projectName"])
+            self.assertEqual("manager-node-001", config["roles"]["manager"]["agentName"])
+            self.assertEqual("claude", config["roles"]["worker"]["agentProvider"])
+            self.assertEqual("claude", config["roles"]["reviewer"]["agentProvider"])
+            self.assertEqual("claude", config["roles"]["manager"]["agentProvider"])
+            self.assertNotIn("command", config["roles"]["worker"])
             mcp_config = json.loads((target / ".mcp.json").read_text(encoding="utf-8"))
             self.assertEqual("http", mcp_config["mcpServers"]["wacha"]["type"])
             settings = json.loads((target / ".claude/settings.json").read_text(encoding="utf-8"))
@@ -69,6 +75,286 @@ class RalphInstallerTest(unittest.TestCase):
             ROOT / "ralph/providers/codex.sh",
         ]
         subprocess.run(["bash", "-n", *map(str, shell_files)], check=True)
+
+    def test_manager_runs_only_for_unclaimed_wait_accept_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sample-project"
+            bin_dir = Path(directory) / "bin"
+            target.mkdir()
+            bin_dir.mkdir()
+            launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
+
+            fake_curl = bin_dir / "curl"
+            fake_curl.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"$RALPH_TEST_STATE_DIR/requests"
+if [[ "$*" == *'list_projects'* ]]; then
+  printf '%s\\n' '{"result":{"structuredContent":{"projects":[{"id":"project-1","name":"sample-project"}]}}}'
+elif [[ -f "$RALPH_TEST_STATE_DIR/ready" ]]; then
+  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"in_review":1,"wait_accept":1}},"tasks":[{"id":"review-1","status":"in_review"},{"id":"accept-1","status":"wait_accept"}]}}}'
+else
+  printf '%s\\n' '{"result":{"structuredContent":{"summary":{"byStatus":{"in_review":1,"wait_accept":1}},"tasks":[{"id":"review-1","status":"in_review"}]}}}'
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            fake_claude = bin_dir / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' "$WACHA_AGENT_NAME" >"$RALPH_TEST_STATE_DIR/agent-name"
+printf '%s\\n' "$@" >"$RALPH_TEST_STATE_DIR/claude-args"
+touch "$RALPH_TEST_STATE_DIR/started"
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["RALPH_TEST_STATE_DIR"] = directory
+            subprocess.run([str(launcher), "init"], cwd=target, env=environment, check=True, capture_output=True)
+            config_path = target / ".ralph/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["pollIntervalSeconds"] = 1
+            config["retry"]["initialSeconds"] = 1
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            process = subprocess.Popen(
+                [str(launcher), "run", "manager"],
+                cwd=target,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not (Path(directory) / "requests").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                log_path = target / ".ralph/logs/ralph.log"
+                while (not log_path.exists() or "待機を開始します" not in log_path.read_text(encoding="utf-8")) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse((Path(directory) / "started").exists())
+                (Path(directory) / "ready").touch()
+                while not (Path(directory) / "started").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            finally:
+                process.terminate()
+                stdout, stderr = process.communicate(timeout=5)
+
+            self.assertTrue((Path(directory) / "started").exists(), f"stdout={stdout!r} stderr={stderr!r}")
+            self.assertIn("Manager対象: wait_accept=1 available=1", stdout)
+            self.assertEqual("manager-node-001", (Path(directory) / "agent-name").read_text().strip())
+            requests = (Path(directory) / "requests").read_text(encoding="utf-8")
+            self.assertIn('"availableFor":"acceptance"', requests)
+            self.assertNotIn('"limit":1', requests)
+
+    def test_auto_run_prioritizes_acceptance_review_rejection_and_new_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sample-project"
+            bin_dir = Path(directory) / "bin"
+            target.mkdir()
+            bin_dir.mkdir()
+            launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
+
+            fake_curl = bin_dir / "curl"
+            fake_curl.write_text(
+                """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["RALPH_TEST_STATE_DIR"])
+request = json.loads(sys.argv[sys.argv.index("--data") + 1])
+name = request["params"]["name"]
+if name == "list_projects":
+    content = {"projects": [{"id": "project-1", "name": "sample-project"}]}
+else:
+    arguments = request["params"]["arguments"]
+    with (root / "requests").open("a") as output:
+        output.write(json.dumps({"agent": os.environ["WACHA_AGENT_NAME"], **arguments}) + "\\n")
+    phase = int((root / "phase").read_text()) if (root / "phase").exists() else 0
+    all_tasks = [
+        {"id": "accept-1", "status": "wait_accept"},
+        {"id": "review-1", "status": "in_review"},
+        {"id": "reject-1", "status": "rejected"},
+        {"id": "new-1", "status": "todo"},
+    ]
+    remaining = all_tasks[phase:]
+    availability = arguments["filter"]["availableFor"]
+    valid = {
+        "acceptance": {"wait_accept", "in_review"},
+        "review": {"in_review"},
+        "work": {"rejected", "todo"},
+    }[availability]
+    content = {
+        "summary": {"byStatus": {status: sum(task["status"] == status for task in remaining)
+                                  for status in ("wait_accept", "in_review", "rejected", "todo")}},
+        "tasks": [task for task in remaining if task["status"] in valid],
+    }
+print(json.dumps({"result": {"structuredContent": content}}))
+""",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            fake_claude = bin_dir / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["RALPH_TEST_STATE_DIR"])
+role = os.environ["WACHA_AGENT_NAME"]
+prompt = sys.argv[sys.argv.index("-p") + 1]
+with (root / "runs").open("a") as output:
+    output.write(json.dumps({"agent": role, "rejected_first": "`rejected` Taskを優先" in prompt}) + "\\n")
+phase = int((root / "phase").read_text()) if (root / "phase").exists() else 0
+(root / "phase").write_text(str(phase + 1))
+if phase == 3:
+    (root / "done").touch()
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            fake_codex = bin_dir / "codex"
+            fake_codex.write_text(
+                """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["RALPH_TEST_STATE_DIR"])
+prompt = sys.stdin.read()
+with (root / "runs").open("a") as output:
+    output.write(json.dumps({"agent": os.environ["WACHA_AGENT_NAME"],
+                             "rejected_first": "`rejected` Taskを優先" in prompt}) + "\\n")
+phase = int((root / "phase").read_text())
+(root / "phase").write_text(str(phase + 1))
+""",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["RALPH_TEST_STATE_DIR"] = directory
+            subprocess.run([str(launcher), "init"], cwd=target, env=environment, check=True, capture_output=True)
+            config_path = target / ".ralph/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["pollIntervalSeconds"] = 1
+            config["retry"]["initialSeconds"] = 1
+            config["roles"]["reviewer"]["agentProvider"] = "codex"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            process = subprocess.Popen(
+                [str(launcher), "run"], cwd=target, env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                deadline = time.monotonic() + 8
+                while not (Path(directory) / "done").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            finally:
+                process.terminate()
+                stdout, stderr = process.communicate(timeout=5)
+
+            self.assertTrue((Path(directory) / "done").exists(), f"stdout={stdout!r} stderr={stderr!r}")
+            runs = [json.loads(line) for line in (Path(directory) / "runs").read_text().splitlines()]
+            self.assertEqual(
+                ["manager-node-001", "reviewer-node-001", "worker-node-001", "worker-node-001"],
+                [run["agent"] for run in runs],
+            )
+            self.assertEqual([False, False, True, False], [run["rejected_first"] for run in runs])
+            requests = [json.loads(line) for line in (Path(directory) / "requests").read_text().splitlines()]
+            self.assertTrue(all("limit" not in request for request in requests))
+            self.assertEqual("acceptance", requests[0]["filter"]["availableFor"])
+            self.assertIn("review", [request["filter"]["availableFor"] for request in requests])
+            self.assertIn("work", [request["filter"]["availableFor"] for request in requests])
+
+    def test_auto_run_uses_reviewer_while_manager_waits_for_token_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sample-project"
+            bin_dir = Path(directory) / "bin"
+            target.mkdir()
+            bin_dir.mkdir()
+            launcher, _ = install_global(Path(directory) / "share", Path(directory) / "global-bin")
+
+            fake_curl = bin_dir / "curl"
+            fake_curl.write_text(
+                """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+root = Path(os.environ["RALPH_TEST_STATE_DIR"])
+request = json.loads(sys.argv[sys.argv.index("--data") + 1])
+if request["params"]["name"] == "list_projects":
+    content = {"projects": [{"id": "project-1", "name": "sample-project"}]}
+else:
+    availability = request["params"]["arguments"]["filter"]["availableFor"]
+    tasks = {
+        "acceptance": [{"id": "accept-1", "status": "wait_accept"}],
+        "review": [{"id": "review-1", "status": "in_review"}],
+        "work": [],
+    }[availability]
+    content = {"summary": {"byStatus": {"wait_accept": 1, "in_review": 1}}, "tasks": tasks}
+print(json.dumps({"result": {"structuredContent": content}}))
+""",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            fake_codex = bin_dir / "codex"
+            fake_codex.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' x >>"$RALPH_TEST_STATE_DIR/manager-runs"
+printf '%s\\n' 'usage limit reached' >&2
+exit 42
+""",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            fake_claude = bin_dir / "claude"
+            fake_claude.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' "$WACHA_AGENT_NAME" >"$RALPH_TEST_STATE_DIR/reviewer-run"
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
+            environment["RALPH_TEST_STATE_DIR"] = directory
+            subprocess.run([str(launcher), "init"], cwd=target, env=environment, check=True, capture_output=True)
+            config_path = target / ".ralph/config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["roles"]["manager"]["agentProvider"] = "codex"
+            config["pollIntervalSeconds"] = 1
+            config["retry"]["tokenLimitSeconds"] = 30
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            process = subprocess.Popen(
+                [str(launcher), "run"], cwd=target, env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not (Path(directory) / "reviewer-run").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+            finally:
+                process.terminate()
+                stdout, stderr = process.communicate(timeout=5)
+
+            self.assertTrue((Path(directory) / "reviewer-run").exists(), f"stdout={stdout!r} stderr={stderr!r}")
+            self.assertEqual("reviewer-node-001", (Path(directory) / "reviewer-run").read_text().strip())
+            self.assertEqual(1, len((Path(directory) / "manager-runs").read_text().splitlines()))
+            self.assertIn("Token上限に達しました", stderr)
 
     def test_global_cli_initializes_and_runs_project(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -317,6 +603,9 @@ touch "$RALPH_TEST_STATE_DIR/done"
             )
             config_path = target / ".ralph/config.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual("codex", config["agentProvider"])
+            self.assertNotIn("command", config["roles"]["worker"])
+            self.assertTrue(all(role["agentProvider"] == "codex" for role in config["roles"].values()))
             config["agentProvider"] = "claude"
             config["roles"]["worker"]["agentProvider"] = "codex"
             config["roles"]["worker"]["command"] = str(fake_codex)

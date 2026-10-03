@@ -26,6 +26,18 @@ class RuntimeAdapterTest(unittest.TestCase):
             self.assertIn(f"[mcp_servers.wacha.tools.{tool}]", config)
         self.assertEqual(len(self.policy["mcp"]["wacha"]["allow"]), config.count('approval_mode = "approve"'))
 
+    def test_codex_allows_manager_acceptance_tools(self):
+        allowed_tools = set(self.policy["mcp"]["wacha"]["allow"])
+        self.assertTrue({
+            "get_skill_context",
+            "list_changes",
+            "claim_acceptance",
+            "accept_task",
+            "reject_task",
+            "renew_claim",
+            "release_claim",
+        } <= allowed_tools)
+
     def test_claude_contains_permission_groups(self):
         output = render_claude(self.policy)
         settings = json.loads(output[".claude/settings.json"])

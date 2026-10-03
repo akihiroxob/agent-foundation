@@ -26,13 +26,16 @@
     "worker": {
       "agentName": "worker-node-001",
       "agentProvider": "claude",
-      "command": "claude",
       "model": ""
     },
     "reviewer": {
       "agentName": "reviewer-node-001",
       "agentProvider": "claude",
-      "command": "claude",
+      "model": ""
+    },
+    "manager": {
+      "agentName": "manager-node-001",
+      "agentProvider": "claude",
       "model": ""
     }
   }
