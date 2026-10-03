@@ -237,8 +237,29 @@ prepare_role() {
   provider_requirements
 }
 
+AUTO_MANAGER_RETRY_AT=0
+AUTO_REVIEWER_RETRY_AT=0
+AUTO_WORKER_RETRY_AT=0
+
+auto_role_retry_at() {
+  case "$1" in
+    manager) printf '%s\n' "$AUTO_MANAGER_RETRY_AT" ;;
+    reviewer) printf '%s\n' "$AUTO_REVIEWER_RETRY_AT" ;;
+    worker) printf '%s\n' "$AUTO_WORKER_RETRY_AT" ;;
+  esac
+}
+
+auto_set_role_retry_at() {
+  local retry_at="$2"
+  case "$1" in
+    manager) AUTO_MANAGER_RETRY_AT="$retry_at" ;;
+    reviewer) AUTO_REVIEWER_RETRY_AT="$retry_at" ;;
+    worker) AUTO_WORKER_RETRY_AT="$retry_at" ;;
+  esac
+}
+
 select_auto_role() {
-  local candidate candidate_summary pending
+  local candidate candidate_summary pending retry_at
   local manager_summary reviewer_summary worker_summary
   role=auto
   set_log_role
@@ -251,7 +272,8 @@ select_auto_role() {
       worker) worker_summary="$candidate_summary" ;;
     esac
     pending="$(backend_pending_count "$candidate" "$candidate_summary")"
-    if (( pending > 0 )); then
+    retry_at="$(auto_role_retry_at "$candidate")"
+    if (( pending > 0 && $(date +%s) >= retry_at )); then
       role="$candidate"
       set_log_role
       summary="$candidate_summary"
@@ -344,11 +366,18 @@ while true; do
     PROVIDER_TOKEN_LIMIT_RETRY_SECONDS=""
     if provider_hit_token_limit; then
       if [[ "$PROVIDER_TOKEN_LIMIT_RESET_PARSED" == true ]]; then
-        wait_before_retry \
-          "${role}がToken上限に達しました。Reset時刻を検出しました。" \
-          "$PROVIDER_TOKEN_LIMIT_RETRY_SECONDS"
+        retry_delay="$PROVIDER_TOKEN_LIMIT_RETRY_SECONDS"
+        retry_reason="${role}がToken上限に達しました。Reset時刻を検出しました。"
       else
-        wait_before_retry "${role}がToken上限に達しました。" "$RETRY_TOKEN_LIMIT_SECONDS"
+        retry_delay="$RETRY_TOKEN_LIMIT_SECONDS"
+        retry_reason="${role}がToken上限に達しました。"
+      fi
+      if [[ "$mode" == auto ]]; then
+        auto_set_role_retry_at "$role" "$(($(date +%s) + retry_delay))"
+        ralph_log_error '%s %d秒間このRoleを待機し、次のRoleを確認します。\n' \
+          "$retry_reason" "$retry_delay"
+      else
+        wait_before_retry "$retry_reason" "$retry_delay"
       fi
     else
       wait_before_retry "${role}が終了コード ${provider_status} で終了しました。"
