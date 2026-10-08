@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
+PROVIDER_RESET_PARSER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/limit_reset.py"
+
 CLAUDE_BIN="${RALPH_AGENT_COMMAND:-$(jq -r '.claude.command // "claude"' "$RALPH_CONFIG_PATH")}"
 CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS="$(jq -r '.claude.dangerouslySkipPermissions // false' "$RALPH_CONFIG_PATH")"
 
@@ -51,14 +53,21 @@ provider_run() {
     args=(--dangerously-skip-permissions "${args[@]}")
   fi
 
-  if (
+  if [[ "${GITHUB_ENABLED:-false}" == true ]]; then
+    args+=(--mcp-config "$project_root/.ralph/mcp.json" --strict-mcp-config)
+  fi
+
+  (
     cd "$project_root"
-    "$CLAUDE_BIN" "${args[@]}" >"$output_pipe" 2>"$error_pipe"
-  ); then
+    exec "$CLAUDE_BIN" "${args[@]}" >"$output_pipe" 2>"$error_pipe"
+  ) &
+  PROVIDER_PID=$!
+  if wait "$PROVIDER_PID"; then
     provider_status=0
   else
     provider_status=$?
   fi
+  PROVIDER_PID=""
   wait "$error_tee_pid" 2>/dev/null || true
   wait "$output_tee_pid" 2>/dev/null || true
   rm -f "$error_pipe" "$output_pipe"
@@ -70,35 +79,7 @@ provider_run() {
   return "$provider_status"
 }
 
-provider_reset_retry_seconds() {
-  python3 - "$@" <<'PY'
-import math
-import re
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
-from zoneinfo import ZoneInfo
-
-text = "\n".join(Path(path).read_text(encoding="utf-8", errors="replace") for path in sys.argv[1:])
-matches = re.findall(
-    r"resets\s+(\d{1,2}:\d{2}\s*(?:am|pm))\s*\(([^()]+)\)",
-    text,
-    flags=re.IGNORECASE,
-)
-if not matches:
-    raise SystemExit(1)
-
-time_text, timezone_name = matches[-1]
-timezone = ZoneInfo(timezone_name.strip())
-now = datetime.now(timezone)
-parsed_time = datetime.strptime(re.sub(r"\s+", "", time_text).upper(), "%I:%M%p")
-reset_at = now.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0)
-if reset_at <= now:
-    reset_at += timedelta(days=1)
-
-print(max(1, math.ceil((reset_at - now).total_seconds()) + 60))
-PY
-}
+provider_reset_retry_seconds() { python3 "$PROVIDER_RESET_PARSER" "$@"; }
 
 provider_hit_token_limit() {
   local match_status reset_seconds

@@ -4,7 +4,7 @@
 
 ## 作業手順
 
-1. Wachaで、`baseDir: {{PROJECT_ROOT}}`、`projectName: {{PROJECT_NAME}}`、`requestedRole: manager`を使ってmanagerロールを取得する。
+1. `list_projects`で対象Projectを確認する。認可は事前に付与されたGrantと、この実行のPrincipalを使う。Role取得・切替操作は行わない。
 2. `get_role_instructions(role: "manager", includeShared: true)`と`get_skill_context({ name: "accept-task" })`を読み、最終受入の制約と手順に従う。
 3. `{{PROJECT_NAME}}` の`availableFor: "acceptance"`候補から、Reviewerが処理済みの`wait_accept` Taskを1件だけ選ぶ。対象がなければ変更せず終了する。`in_review`は選ばない。
 4. Task、親Story、Worker・Reviewerのコメント、関連する変更履歴、プロジェクトの正本資料、実際の成果を確認する。

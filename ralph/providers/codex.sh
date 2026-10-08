@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
+PROVIDER_RESET_PARSER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/limit_reset.py"
+
 CODEX_BIN="${RALPH_AGENT_COMMAND:-$(jq -r '.codex.command // "codex"' "$RALPH_CONFIG_PATH")}"
 CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX="$(jq -r '.codex.dangerouslyBypassApprovalsAndSandbox // false' "$RALPH_CONFIG_PATH")"
 
 provider_requirements() {
   require_command "$CODEX_BIN"
+  require_command python3
   require_command mkfifo
   require_command tee
   case "$CODEX_DANGEROUSLY_BYPASS_APPROVALS_AND_SANDBOX" in
@@ -57,14 +60,17 @@ provider_run() {
     -
   )
 
-  if (
+  (
     cd "$project_root"
-    "$CODEX_BIN" "${args[@]}" <"$prompt_path" 2>"$error_pipe"
-  ); then
+    exec "$CODEX_BIN" "${args[@]}" <"$prompt_path" 2>"$error_pipe"
+  ) &
+  PROVIDER_PID=$!
+  if wait "$PROVIDER_PID"; then
     provider_status=0
   else
     provider_status=$?
   fi
+  PROVIDER_PID=""
   wait "$tee_pid" 2>/dev/null || true
   rm -f "$error_pipe"
   if (( provider_status == 0 )); then
@@ -75,10 +81,16 @@ provider_run() {
 }
 
 provider_hit_token_limit() {
-  local match_status
+  local match_status reset_seconds
+  PROVIDER_TOKEN_LIMIT_RESET_PARSED=false
+  PROVIDER_TOKEN_LIMIT_RETRY_SECONDS=""
   [[ -n "${PROVIDER_ERROR_LOG:-}" && -f "$PROVIDER_ERROR_LOG" ]] || return 1
   if grep -Eiq "usage limit|rate limit|quota (has been )?exceeded|too many requests|limit (has been )?reached" "$PROVIDER_ERROR_LOG"; then
     match_status=0
+    if reset_seconds="$(python3 "$PROVIDER_RESET_PARSER" "$PROVIDER_ERROR_LOG" 2>/dev/null)"; then
+      PROVIDER_TOKEN_LIMIT_RESET_PARSED=true
+      PROVIDER_TOKEN_LIMIT_RETRY_SECONDS="$reset_seconds"
+    fi
   else
     match_status=1
   fi

@@ -4,7 +4,7 @@
 
 ## 作業手順
 
-1. Wachaで、`baseDir: {{PROJECT_ROOT}}`、`projectName: {{PROJECT_NAME}}`、`requestedRole: worker`を使ってworkerロールを取得する。
+1. `list_projects`で対象Projectを確認する。認可は事前に付与されたGrantと、この実行のPrincipalを使う。Role取得・切替操作は行わない。
 2. `get_role_instructions(role: "worker", includeShared: true)`を読み、ロールの制約に従う。
 3. `{{PROJECT_NAME}}` のTask状態を確認する。自分が担当する`doing` Taskがあれば再開し、なければ`todo`または`rejected`から1件だけ引き受ける。
 4. Taskに必要なSkill、プロジェクトの指示、仕様、既存実装を確認する。

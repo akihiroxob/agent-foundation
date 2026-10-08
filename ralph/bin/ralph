@@ -146,12 +146,52 @@ def run_command(args: argparse.Namespace) -> int:
         print("Run `ralph init` in the project first.")
         return 2
 
+    # One host runner owns PR mutations in a Project. Separate Projects can run concurrently.
+    lock = root / ".ralph" / "runner.pid"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            with os.fdopen(descriptor, "w") as output:
+                output.write(str(os.getpid()))
+            break
+        except FileExistsError:
+            try:
+                pid = int(lock.read_text())
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                lock.unlink(missing_ok=True)
+                continue
+            except (ValueError, PermissionError):
+                print("Ralph lock cannot be verified; inspect .ralph/runner.pid")
+                return 2
+            print("Ralph is already running for this Project")
+            return 2
+    else:
+        return 2
     environment = os.environ.copy()
     os.execve(
         LOOP_COMMAND,
         [str(LOOP_COMMAND), "--config", str(config_path), args.role],
         environment,
     )
+
+
+def resume_command(args: argparse.Namespace) -> int:
+    root = find_project_root(args.project_root)
+    roles = ("worker", "reviewer", "manager") if args.role == "all" else (args.role,)
+    for role in roles:
+        if args.discard_execution:
+            path = root / ".ralph" / "github-state" / f"{role}.json"
+            if path.exists():
+                config_path = args.config.expanduser().resolve() if args.config else root / ".ralph/config.json"
+                helper = RUNTIME_ROOT / "lib" / "github_workflow.py"
+                result = subprocess.run(["python3", str(helper), "abandon", "--config", str(config_path), "--role", role], check=False)
+                if result.returncode:
+                    return result.returncode
+        (root / ".ralph" / "pauses" / f"{role}.json").unlink(missing_ok=True)
+        print(f"resumed {role}; retained Claim/worktree and pending decisions")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -170,6 +210,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--project-root", type=Path)
     run_parser.add_argument("--config", type=Path)
     run_parser.set_defaults(handler=run_command)
+    resume = subparsers.add_parser("resume", help="Resume a role after fixing its blocker")
+    resume.add_argument("role", choices=["all", "worker", "reviewer", "manager"])
+    resume.add_argument("--project-root", type=Path)
+    resume.add_argument("--config", type=Path)
+    resume.add_argument("--discard-execution", action="store_true", help="Release Claim and archive pending execution; keep worktrees")
+    resume.set_defaults(handler=resume_command)
+
     return parser
 
 

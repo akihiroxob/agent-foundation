@@ -4,7 +4,7 @@
 
 ## 作業手順
 
-1. Wachaで、`baseDir: {{PROJECT_ROOT}}`、`projectName: {{PROJECT_NAME}}`、`requestedRole: reviewer`を使ってreviewerロールを取得する。
+1. `list_projects`で対象Projectを確認する。認可は事前に付与されたGrantと、この実行のPrincipalを使う。Role取得・切替操作は行わない。
 2. `get_role_instructions(role: "reviewer", includeShared: true)`を読み、ロールの制約に従う。
 3. `{{PROJECT_NAME}}` の`in_review` Taskを1件だけ引き受ける。対象がなければ変更せず終了する。
 4. Task要件、コメント、プロジェクトの指示、関連知識、変更差分を確認する。
