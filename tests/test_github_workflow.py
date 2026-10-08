@@ -271,8 +271,9 @@ class GitHubWorkflowTest(unittest.TestCase):
             workflow.validate_remote()
 
     def test_reset_parser_handles_codex_and_claude_with_timezones(self):
+        local_now = datetime(2026, 10, 8, 17, 37).astimezone()
+        self.assertEqual(180, retry_seconds("try again at 5:39 PM", local_now))
         now = datetime(2026, 10, 8, 17, 37, tzinfo=ZoneInfo("Asia/Tokyo"))
-        self.assertEqual(180, retry_seconds("try again at 5:39 PM", now))
         self.assertEqual(180, retry_seconds("resets 5:39pm (Asia/Tokyo)", now))
 
     def test_large_sse_response_does_not_write_to_a_closed_jq_pipe(self):
