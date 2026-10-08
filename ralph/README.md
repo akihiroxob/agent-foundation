@@ -2,6 +2,8 @@
 
 WachaのTask状態を監視し、Claude CodeまたはCodexのWorker・Reviewer・最終受入専用Managerを1 Taskずつ使い捨てで起動するRunnerです。
 
+GitHub方式の設定・資格情報・worktree・PR・受入・復旧は [GitHub Workflow](GITHUB.md) を参照してください。
+
 ## 責務
 
 - Ralph Runner: Taskの有無の確認、エージェントプロセスの起動、失敗時の待機と再試行
@@ -167,11 +169,11 @@ Roleごとに実行する場合は次を使います。
 ./.ralph/runtime/bin/ralph run manager
 ```
 
-既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Managerは`availableFor: acceptance`のうち、Reviewerを通過した`wait_accept`だけを対象にします。`in_review`の直接受入やStory管理は行いません。自動実行でWorkerを選ぶ際は、利用可能な`rejected`があれば新規Taskより先に対応するようPromptで指示します。対象一覧に`limit`は指定せず、個別のTaskはAgentが選びます。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
+既定では対象Taskがない間、300秒ごとに再確認します。WorkerはWachaの`availableFor: work`、Reviewerは`availableFor: review`に該当するTaskがある場合だけ起動します。Managerは`availableFor: acceptance`のうち、Reviewerを通過した`wait_accept`だけを対象にします。`in_review`の直接受入やStory管理は行いません。自動実行でWorkerを選ぶ際は、利用可能な`rejected`があれば新規Taskより先に対応するようPromptで指示します。ローカル方式では対象一覧に`limit`は指定せず、個別のTaskはAgentが選びます。GitHub方式ではRalphが候補から1件をClaimして、TaskとClaimをAgentへ渡します。Claim中のTaskは対象外となり、Claim失効などによって再び利用可能になるまで待機します。
 
-Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Claudeの上限メッセージから`resets 11:20pm (Asia/Tokyo)`形式のReset時刻を取得できた場合は、その時刻の60秒後まで待機します。時刻を取得・解釈できない場合は1800秒、それ以外の失敗は常に300秒待って再試行します。Agentが終了コード0で終了してもTask状態が変化しなかった場合は、通常エラーと同じ待機になります。
+Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、Wachaの一時的な通信失敗が起きてもRalphプロセスは終了しません。Claudeの`resets 11:20pm (Asia/Tokyo)`またはCodexの`try again at 5:39 PM`形式のReset時刻を取得できた場合は、その時刻の60秒後まで待機します。時刻を取得・解釈できない場合は1800秒、通常エラーは300秒待って再試行します。進捗なし・通常エラーが`retry.maxNoProgressAttempts`（既定3）回続いた場合はRoleを停止し、`ralph resume <role>`で再開します。停止状態は再起動後も保持します。
 
-`ralph run`の自動実行では、Token上限に達したRoleだけを待機対象にし、その間も次のRoleを確認します。たとえばManagerのCodexがToken上限に達しても、ReviewerのClaudeで処理できるTaskがあれば続行します。待機期限後は通常の優先順位でManagerを再確認します。Roleを指定した実行では従来どおりプロセス全体が待機します。
+`ralph run`の自動実行では、Token上限をProviderと`quotaKey`単位で共有し、その間も別Provider・別quotaKeyのRoleを確認します。たとえばManagerのCodexがToken上限に達しても、ReviewerのClaudeで処理できるTaskがあれば続行します。待機期限後は通常の優先順位でManagerを再確認します。Roleを指定した実行では従来どおりプロセス全体が待機します。
 
 待機時間は`.ralph/config.json`で変更できます。
 
@@ -220,4 +222,4 @@ Taskがない場合もWachaの確認は`pollIntervalSeconds`間隔で継続し�
 }
 ```
 
-複数Roleを同じworktreeで同時実行すると、Git操作や差分確認が競合します。並列実行する場合は役割ごとに別のGit worktreeを使用してください。
+複数Roleを同じworktreeで同時実行すると、Git操作や差分確認が競合します。1つのcheckoutに複数のRunnerを起動しないでください。並列実行する場合は別checkout・別設定・別Agent名を使用してください。GitHub方式のTask実行はRunnerが専用worktreeを用意します。

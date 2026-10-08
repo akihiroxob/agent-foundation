@@ -5,7 +5,8 @@
   "pollIntervalSeconds": 300,
   "retry": {
     "initialSeconds": 300,
-    "tokenLimitSeconds": 1800
+    "tokenLimitSeconds": 1800,
+    "maxNoProgressAttempts": 3
   },
   "logging": {
     "path": ".ralph/logs/ralph.log",
@@ -38,5 +39,14 @@
       "agentProvider": "claude",
       "model": ""
     }
+  },
+  "github": {
+    "enabled": false,
+    "tokenEnvs": {
+      "worker": "RALPH_GITHUB_TOKEN",
+      "reviewer": "RALPH_GITHUB_TOKEN",
+      "manager": "RALPH_GITHUB_TOKEN"
+    },
+    "setupCommands": []
   }
 }

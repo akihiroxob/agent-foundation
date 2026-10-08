@@ -170,10 +170,13 @@ setup_logging
 rendered_prompt=""
 cleanup() {
   local exit_status=$?
+  if [[ -n "${PROVIDER_PID:-}" ]]; then kill "$PROVIDER_PID" 2>/dev/null || true; wait "$PROVIDER_PID" 2>/dev/null || true; fi
+  if [[ -n "${heartbeat_pid:-}" ]]; then kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; fi
   cleanup_logging
   if [[ -n "$rendered_prompt" ]]; then
     rm -f "$rendered_prompt"
   fi
+  if [[ -f "$PROJECT_ROOT/.ralph/runner.pid" && "$(<"$PROJECT_ROOT/.ralph/runner.pid")" == "$$" ]]; then rm -f "$PROJECT_ROOT/.ralph/runner.pid"; fi
   return "$exit_status"
 }
 trap cleanup EXIT
@@ -237,6 +240,59 @@ prepare_role() {
   provider_requirements
 }
 
+GITHUB_ENABLED="$(jq -r '.github.enabled // false' "$CONFIG_PATH")"
+MAX_NO_PROGRESS="$(jq -er '.retry.maxNoProgressAttempts // 3 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
+PAUSE_DIR="$PROJECT_ROOT/.ralph/pauses"
+mkdir -p "$PAUSE_DIR"
+GITHUB_HELPER="$RALPH_ROOT/lib/github_workflow.py"
+role_paused() { [[ -f "$PAUSE_DIR/$1.json" ]] && jq -e '.paused == true' "$PAUSE_DIR/$1.json" >/dev/null; }
+pause_role() {
+  jq -cn --arg reason "$2" '{paused: true, reason: $reason}' >"$PAUSE_DIR/$1.json.tmp"
+  mv "$PAUSE_DIR/$1.json.tmp" "$PAUSE_DIR/$1.json"
+  ralph_log_error '%sを停止しました: %s。原因を解消後、ralph resume %s で再開してください。\n' "$1" "$2" "$1"
+}
+record_no_progress() {
+  local file="$PAUSE_DIR/$1.json" attempts=0
+  if [[ -f "$file" ]]; then attempts="$(jq -r '.attempts // 0' "$file")"; fi
+  attempts=$((attempts + 1))
+  jq -cn --argjson attempts "$attempts" '{attempts: $attempts, paused: false}' >"$file.tmp"
+  mv "$file.tmp" "$file"
+  if (( attempts >= MAX_NO_PROGRESS )); then pause_role "$1" 'Task状態が連続して進みませんでした'; fi
+}
+github_command() { python3 "$GITHUB_HELPER" "$1" --config "$CONFIG_PATH" --role "$role"; }
+provider_without_github_credentials() {
+  local token_name token_value status index
+  local -a token_names=() token_values=()
+  while IFS= read -r token_name; do
+    if [[ "$token_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ && -n "${!token_name:-}" ]]; then
+      token_names+=("$token_name")
+      token_values+=("${!token_name}")
+      unset "$token_name"
+    fi
+  done < <(jq -r '.github.tokenEnvs // {worker:"RALPH_GITHUB_TOKEN",reviewer:"RALPH_GITHUB_TOKEN",manager:"RALPH_GITHUB_TOKEN"} | ([.[]] + ["GH_TOKEN", "GITHUB_TOKEN", "WACHA_GITHUB_TOKEN"]) | unique[]' "$CONFIG_PATH")
+  if provider_run "$rendered_prompt" "$execution_root"; then status=0; else status=$?; fi
+  for ((index=0; index<${#token_names[@]}; index++)); do
+    export "${token_names[index]}=${token_values[index]}"
+  done
+  return "$status"
+}
+
+quota_key() {
+  jq -r --arg role "$1" '(.roles[$role].agentProvider // .agentProvider) + ":" + (.roles[$role].quotaKey // "default")' "$CONFIG_PATH"
+}
+quota_retry_at() {
+  local path="$PROJECT_ROOT/.ralph/quota.json" key
+  key="$(quota_key "$1")"
+  if [[ -f "$path" ]]; then jq -r --arg key "$key" '.[$key] // 0' "$path"; else printf '0\n'; fi
+}
+set_quota_retry_at() {
+  local path="$PROJECT_ROOT/.ralph/quota.json" key contents='{}'
+  key="$(quota_key "$1")"
+  if [[ -f "$path" ]]; then contents="$(<"$path")"; fi
+  jq --arg key "$key" --argjson until "$2" '.[$key] = $until' <<<"$contents" >"$path.tmp"
+  mv "$path.tmp" "$path"
+}
+
 AUTO_MANAGER_RETRY_AT=0
 AUTO_REVIEWER_RETRY_AT=0
 AUTO_WORKER_RETRY_AT=0
@@ -259,11 +315,12 @@ auto_set_role_retry_at() {
 }
 
 select_auto_role() {
-  local candidate candidate_summary pending retry_at
-  local manager_summary reviewer_summary worker_summary
+  local candidate candidate_summary pending retry_at quota_at
+  local manager_summary='{"availableCount":0}' reviewer_summary='{"availableCount":0}' worker_summary='{"availableCount":0}'
   role=auto
   set_log_role
   for candidate in manager reviewer worker; do
+    if role_paused "$candidate"; then continue; fi
     set_role_identity "$candidate"
     candidate_summary="$(backend_get_task_summary "$candidate")" || return 1
     case "$candidate" in
@@ -272,7 +329,10 @@ select_auto_role() {
       worker) worker_summary="$candidate_summary" ;;
     esac
     pending="$(backend_pending_count "$candidate" "$candidate_summary")"
+    if [[ "$GITHUB_ENABLED" == true && -f "$PROJECT_ROOT/.ralph/github-state/$candidate.json" ]]; then pending=1; fi
     retry_at="$(auto_role_retry_at "$candidate")"
+    quota_at="$(quota_retry_at "$candidate")"
+    if (( quota_at > retry_at )); then retry_at="$quota_at"; fi
     if (( pending > 0 && $(date +%s) >= retry_at )); then
       role="$candidate"
       set_log_role
@@ -316,12 +376,16 @@ while true; do
     else
       pending="$(backend_pending_count "$role" "$summary")"
     fi
+  elif role_paused "$role" || (( $(date +%s) < $(quota_retry_at "$role") )); then
+    sleep "$POLL_INTERVAL_SECONDS"
+    continue
   elif ! summary="$(backend_get_task_summary "$role")"; then
     wait_before_retry 'Wachaの状態取得に失敗しました。'
     continue
   else
     pending="$(backend_pending_count "$role" "$summary")"
   fi
+  if [[ "$GITHUB_ENABLED" == true && "$role" != auto && -f "$PROJECT_ROOT/.ralph/github-state/$role.json" ]]; then pending=1; fi
   if (( pending == 0 )); then
     current_epoch="$(date +%s)"
     normalized_summary="$(jq -cS . <<<"$summary")"
@@ -356,11 +420,45 @@ while true; do
   fi
   backend_print_status "$role" "$summary"
   ralph_log '%sを起動します。\n' "$role"
-  if provider_run "$rendered_prompt" "$PROJECT_ROOT"; then
+  execution_root="$PROJECT_ROOT"
+  heartbeat_pid=""
+  if [[ "$GITHUB_ENABLED" == true ]]; then
+    if context="$(github_command prepare)"; then
+      if [[ "$(jq -r '.idle // false' <<<"$context")" == true ]]; then sleep "$POLL_INTERVAL_SECONDS"; continue; fi
+      execution_root="$(jq -r '.cwd' <<<"$context")"
+      if [[ "$(jq -r '.pending // false' <<<"$context")" != true ]]; then
+        github_prompt="$(config_optional_string ".roles.${role}.githubPrompt")"
+        if [[ -z "$github_prompt" ]]; then github_prompt="$RALPH_ROOT/prompts/github-$role.md";
+        elif [[ "$github_prompt" != /* ]]; then github_prompt="$PROJECT_ROOT/$github_prompt"; fi
+        [[ -f "$github_prompt" ]] || { pause_role "$role" 'GitHub Promptが見つかりません'; continue; }
+        cat "$github_prompt" >"$rendered_prompt"
+        printf '\n実行Context（TaskとClaimはRalphが取得済み）:\n%s\n' "$context" >>"$rendered_prompt"
+      fi
+    else
+      github_status=$?
+      if (( github_status == 78 )); then pause_role "$role" 'GitHub実行の準備に失敗しました'; fi
+      wait_before_retry 'GitHub実行を開始できませんでした。'
+      continue
+    fi
+    if [[ "$(jq -r '.pending // false' <<<"$context")" == true ]]; then
+      if github_command finish; then
+        rm -f "$PAUSE_DIR/$role.json"
+      else
+        github_status=$?
+        if (( github_status == 78 )); then pause_role "$role" 'GitHub実行結果の反映に失敗しました'; fi
+        wait_before_retry 'GitHubの実行結果を再確認します。'
+      fi
+      continue
+    fi
+    python3 "$GITHUB_HELPER" watch --config "$CONFIG_PATH" --role "$role" &
+    heartbeat_pid=$!
+  fi
+  if provider_without_github_credentials; then
     provider_status=0
   else
     provider_status=$?
   fi
+  if [[ -n "$heartbeat_pid" ]]; then kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; fi
   if (( provider_status != 0 )); then
     PROVIDER_TOKEN_LIMIT_RESET_PARSED=false
     PROVIDER_TOKEN_LIMIT_RETRY_SECONDS=""
@@ -372,6 +470,7 @@ while true; do
         retry_delay="$RETRY_TOKEN_LIMIT_SECONDS"
         retry_reason="${role}がToken上限に達しました。"
       fi
+      set_quota_retry_at "$role" "$(($(date +%s) + retry_delay))"
       if [[ "$mode" == auto ]]; then
         auto_set_role_retry_at "$role" "$(($(date +%s) + retry_delay))"
         ralph_log_error '%s %d秒間このRoleを待機し、次のRoleを確認します。\n' \
@@ -380,17 +479,31 @@ while true; do
         wait_before_retry "$retry_reason" "$retry_delay"
       fi
     else
+      record_no_progress "$role"
       wait_before_retry "${role}が終了コード ${provider_status} で終了しました。"
     fi
     continue
   fi
 
+  if [[ "$GITHUB_ENABLED" == true ]]; then
+    if github_command finish; then
+      rm -f "$PAUSE_DIR/$role.json"
+    else
+      github_status=$?
+      if (( github_status == 78 )); then pause_role "$role" 'GitHub実行結果の反映に失敗しました'; fi
+      wait_before_retry 'GitHub実行結果を反映できませんでした。'
+    fi
+    continue
+  fi
   if ! updated_summary="$(backend_get_task_summary "$role")"; then
     wait_before_retry 'Agent実行後のWacha状態取得に失敗しました。'
     continue
   fi
   if [[ "$(jq -cS . <<<"$summary")" == "$(jq -cS . <<<"$updated_summary")" ]]; then
+    record_no_progress "$role"
     wait_before_retry "${role}実行後もTask状態が変化しませんでした。"
     continue
+  else
+    rm -f "$PAUSE_DIR/$role.json"
   fi
 done

@@ -53,7 +53,10 @@
         "claim_acceptance",
         "accept_task",
         "renew_claim",
-        "release_claim"
+        "release_claim",
+        "claim_review",
+        "list_task_pull_requests",
+        "register_task_pull_request"
       ]
     }
   },

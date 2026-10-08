@@ -11,13 +11,16 @@ backend_requirements() {
 normalize_mcp_response() {
   local response="$1"
 
-  if printf '%s' "$response" | jq -e . >/dev/null 2>&1; then
+  if jq -e . >/dev/null 2>&1 <<<"$response"; then
     printf '%s\n' "$response"
     return
   fi
 
   # Streamable HTTPがSSEで返した場合は、最後のJSON data行を使う。
-  printf '%s\n' "$response" | sed -n 's/^data: //p' | tail -n 1
+  local data
+  data="$(sed -n 's/^data: *//p' <<<"$response" | jq -sc 'map(select(.id == 1)) | last')" || return 1
+  [[ "$data" != null ]] || return 1
+  printf '%s\n' "$data"
 }
 
 mcp_call() {
@@ -29,13 +32,13 @@ mcp_call() {
     --arg name "$tool_name" \
     --argjson arguments "$arguments_json" \
     '{jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: $name, arguments: $arguments}}')"
-  raw="$(curl --silent --show-error --fail-with-body --request POST "$WACHA_MCP_URL" \
+  raw="$(curl --silent --show-error --fail-with-body --connect-timeout 10 --max-time 120 --request POST "$WACHA_MCP_URL" \
     --header 'Accept: application/json, text/event-stream' \
     --header 'Content-Type: application/json' \
     --header "Authorization: Bearer $WACHA_AGENT_NAME" \
     --data "$request")"
   response="$(normalize_mcp_response "$raw")"
-  jq -e '.result and (.error | not)' >/dev/null <<<"$response" || {
+  jq -e '.result and (.error | not) and (.result.isError != true)'  >/dev/null <<<"$response" || {
     ralph_log_error 'Wacha MCP呼び出しに失敗しました (%s): %s\n' "$tool_name" "$response"
     exit 1
   }
@@ -66,7 +69,8 @@ backend_get_task_summary() {
   jq -e --arg role "$role" '{
     byStatus: .result.structuredContent.summary.byStatus,
     availableCount: ((.result.structuredContent.tasks // []) | map(select($role != "manager" or .status == "wait_accept")) | length),
-    availableRejected: ((.result.structuredContent.tasks // []) | map(select(.status == "rejected")) | length)
+    availableRejected: ((.result.structuredContent.tasks // []) | map(select(.status == "rejected")) | length),
+    tasks: ((.result.structuredContent.tasks // []) | map(select($role != "manager" or .status == "wait_accept") | {id, status}))
   }' <<<"$tasks"
 }
 

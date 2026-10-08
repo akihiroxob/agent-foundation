@@ -83,3 +83,7 @@ Runnerを利用先に固定する場合は`python3 scripts/install_ralph.py --ta
 3. `.apm/skills/` の共通Skill
 
 プロジェクト固有の技術・ドメインルールは、このパッケージではなく利用先リポジトリ側へ置くことを推奨します。
+
+## GitHubでのTask実行
+
+PR作成、Reviewとmerge、merge commit上のAC受入、worktree隔離、再試行と復旧は [Ralph GitHub Workflow](ralph/GITHUB.md) を参照してください。
