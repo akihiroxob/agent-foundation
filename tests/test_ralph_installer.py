@@ -64,6 +64,8 @@ class RalphInstallerTest(unittest.TestCase):
             self.assertTrue(launcher.stat().st_mode & 0o111)
             self.assertTrue((runtime_dir / "bin/ralph").is_file())
             self.assertTrue((runtime_dir / "bin/ralph-loop").is_file())
+            self.assertTrue((runtime_dir / "lib/git_credential.py").is_file())
+            self.assertTrue((runtime_dir / "lib/host_verification.py").is_file())
             self.assertTrue((runtime_dir / "examples/config.json").is_file())
             self.assertNotIn(".ralph", {path.name for path in root.iterdir()})
 

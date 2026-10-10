@@ -40,6 +40,9 @@
       "model": ""
     }
   },
+  "verification": {
+    "hostCommands": []
+  },
   "github": {
     "enabled": false,
     "tokenEnvs": {

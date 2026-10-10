@@ -59,6 +59,7 @@ Runtime設定は、当面はこのリポジトリをcloneして生成した`dist
 ## 同梱Skill
 
 - `investigate-bug`: 不具合を再現・切り分けし、最小限の修正と検証を行う
+- [`recover-agent-execution`](.apm/skills/recover-agent-execution/SKILL.md): Git・PR・結果反映で停止したAgent実行を調査し、成果物を保持して復旧する
 - `review-documentation-impact`: 実装変更のドキュメント影響を判定し、Workerによる更新とReviewerによる整合性確認を行う
 
 ## Ralph Runner
