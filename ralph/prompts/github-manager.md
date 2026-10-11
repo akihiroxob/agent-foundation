@@ -23,4 +23,6 @@ Gitの変更、GitHub操作、Claimの取得、Wachaのaccept/reject/releaseはR
 
 ## ホスト側の検証
 
+UIに関するACは実ブラウザで独立に検証する。Contextの`browserVerificationEnabled`がtrueなら、`browserVerificationSkill`の`verify-browser-ac`を読み、`ralph_verification`の`start_browser_preview`とPlaywright MCPを使用する。返された専用URLへアクセスし、操作結果とスクリーンショットを確認する。終了時は`browser_close`・`stop_browser_preview`で片付け、summaryに証跡pathを残す。検証用Serverをsandbox内で起動しない。接続・起動・必要な確認ができなければ`decision: blocked`と具体的な理由を記載する。
+
 Contextの`hostVerificationCommands`に必要な検証が登録されていれば、`ralph_verification` MCPの`run_host_verification`を使う。`command`には登録済み配列をそのまま指定し、追加引数やcwdを指定しない。終了コードとログを読み、成功・失敗・skipを区別してsummaryに記録pathを含める。対象HEADと変更内容が検証時から変わっていないことを確認する。sandbox内のEPERMでskipされた検証も、ホスト側で実施できた範囲はその証拠を使う。未登録のコマンドをホストで実行しない。サーバーの起動・検証・停止まで完結するコマンドを使う。

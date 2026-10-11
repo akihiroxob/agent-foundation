@@ -65,9 +65,28 @@ class Workflow:
         return commands(self.config)
 
     def agent_mcp_config(self, claim_id: str) -> dict:
-        servers = {"wacha": {"type": "http", "url": self.config["wacha"]["url"],
-            "headers": {"Authorization": "Bearer ${WACHA_AGENT_NAME}"}}}
-        if self.host_commands():
+        if __package__:
+            from .mcp_config import read_servers
+        else:
+            from mcp_config import read_servers
+        try:
+            servers = read_servers(self.root / ".mcp.json")
+        except ValueError as error:
+            raise WorkflowError(str(error)) from error
+        servers["wacha"] = {"type": "http", "url": self.config["wacha"]["url"],
+            "headers": {"Authorization": "Bearer ${WACHA_AGENT_NAME}"}}
+        if __package__:
+            from .browser_preview import browser_config, playwright_config
+        else:
+            from browser_preview import browser_config, playwright_config
+        browser = browser_config(self.config) if self.role == "manager" else None
+        if browser:
+            servers["playwright"] = playwright_config(self.root)
+            output = self.root / ".ralph/verification" / claim_id / "browser"
+            output.mkdir(parents=True, exist_ok=True)
+            servers["playwright"]["args"] = [*servers["playwright"]["args"], "--output-dir", str(output)]
+            servers["playwright"]["timeout"] = 180000
+        if self.host_commands() or browser:
             servers["ralph_verification"] = {"command": sys.executable, "args": [
                 str(Path(__file__).with_name("host_verification.py")), "--config", str(self.config_path),
                 "--role", self.role, "--claim-id", claim_id], "timeout": 3660000}
@@ -286,14 +305,24 @@ class Workflow:
         self.state["cwd"] = str(directory)
         self.state["resultPath"] = str(directory / ".ralph-result.json")
         self.state.setdefault("initialHeadSha", run("git", "rev-parse", "HEAD", cwd=directory))
-        # Claude discovers MCP servers from its cwd. This contains only an env reference.
+        # Keep the trusted Project definitions and Claim-bound additions in the execution worktree.
         self.state["mcpClaimId"] = self.state["claimId"]
         self.state["agentMcpConfig"] = self.agent_mcp_config(self.state["mcpClaimId"])
         atomic_json(directory / ".ralph" / "mcp.json", self.state["agentMcpConfig"])
         result_path = Path(self.state["resultPath"])
         result_path.unlink(missing_ok=True)
         self.save()
-        return {**self.state, "workflow": self.workflow, "hostVerificationCommands": self.host_commands()}
+        if __package__:
+            from .browser_preview import browser_config
+        else:
+            from browser_preview import browser_config
+        browser_enabled = self.role == "manager" and browser_config(self.config) is not None
+        skill = Path(__file__).resolve().parents[1] / "skills/verify-browser-ac/SKILL.md"
+        if not skill.exists():
+            skill = Path(__file__).resolve().parents[2] / ".apm/skills/verify-browser-ac/SKILL.md"
+        return {**self.state, "workflow": self.workflow, "hostVerificationCommands": self.host_commands(),
+            "browserVerificationEnabled": browser_enabled,
+            "browserVerificationSkill": str(skill) if browser_enabled else None}
 
     def renew(self) -> None:
         if self.state:

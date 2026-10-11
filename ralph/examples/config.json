@@ -42,7 +42,8 @@
     }
   },
   "verification": {
-    "hostCommands": []
+    "hostCommands": [],
+    "browser": null
   },
   "github": {
     "enabled": false,

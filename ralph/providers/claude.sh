@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/mcp_config.sh"
+
 PROVIDER_RESET_PARSER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/limit_reset.py"
 
 CLAUDE_BIN="${RALPH_AGENT_COMMAND:-$(jq -r '.claude.command // "claude"' "$RALPH_CONFIG_PATH")}"
@@ -25,6 +27,9 @@ provider_run() {
   local project_root="$2"
   local error_log error_pipe error_tee_pid output_log output_pipe output_tee_pid provider_status
   local -a args=(--verbose -p "$(<"$prompt_path")")
+
+  ralph_mcp_arguments claude "$project_root" || return 1
+  args+=(${RALPH_MCP_ARGS[@]+"${RALPH_MCP_ARGS[@]}"})
 
   if [[ -n "${RALPH_AGENT_MODEL:-}" ]]; then
     args=(--model "$RALPH_AGENT_MODEL" "${args[@]}")
@@ -53,13 +58,9 @@ provider_run() {
     args=(--dangerously-skip-permissions "${args[@]}")
   fi
 
-  if [[ "${GITHUB_ENABLED:-false}" == true ]]; then
-    args+=(--mcp-config "$project_root/.ralph/mcp.json" --strict-mcp-config)
-  fi
-
   (
     cd "$project_root"
-    if [[ "${GITHUB_ENABLED:-false}" == true ]] && jq -e '.mcpServers.ralph_verification' "$project_root/.ralph/mcp.json" >/dev/null; then
+    if [[ -n "${RALPH_MCP_ARGS[*]:-}" ]]; then
       export CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0
     fi
     exec "$CLAUDE_BIN" "${args[@]}" >"$output_pipe" 2>"$error_pipe"

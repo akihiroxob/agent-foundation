@@ -64,7 +64,7 @@ Runtime設定は、当面はこのリポジトリをcloneして生成した`dist
 
 利用先ではAPMによるパッケージ導入時にMCP定義も展開します。依存パッケージの自己定義MCPに対してAPMが信頼確認を要求する場合は、利用先の `apm.yml` に同じPlaywright定義を直接記載して `apm install` を実行します。既定のChromeが導入されていない環境では、Playwright MCPの `browser_install` ツールでブラウザを準備できます。
 
-このMCPはブラウザ操作を提供します。検証対象アプリのServer起動は別途必要です。Ralph経由の実行では、ProviderのMCP設定読み込みと実行権限を確認してください。特にClaude Providerは厳格なMCP設定を使用するため、APMへの登録だけでRalphの全Providerへ接続済みになるわけではありません。
+このMCPはブラウザ操作を提供します。RalphはProjectの `.mcp.json` に展開された追加MCPを、共通アダプター経由で各Providerへ渡します。Wachaの接続はRalphが管理し、GitHub Managerのブラウザ検証ではPlaywrightの証跡出力先を実行時に追加します。MCPの管理方法は [MCP設定](ralph/MCP.md) を参照してください。検証対象アプリのServerはProjectで `verification.browser` を設定した場合に、専用worktree・ポート・一時データでホスト側から起動できます。設定方法と終了管理は [Managerの実ブラウザ検証](ralph/BROWSER.md) を参照してください。
 
 参照: [APMのMCP導入](https://microsoft.github.io/apm/consumer/install-mcp-servers/)、[Playwright MCP](https://github.com/microsoft/playwright-mcp)。
 
@@ -73,6 +73,7 @@ Runtime設定は、当面はこのリポジトリをcloneして生成した`dist
 - `investigate-bug`: 不具合を再現・切り分けし、最小限の修正と検証を行う
 - [`recover-agent-execution`](.apm/skills/recover-agent-execution/SKILL.md): Git・PR・結果反映で停止したAgent実行を調査し、成果物を保持して復旧する
 - `review-documentation-impact`: 実装変更のドキュメント影響を判定し、Workerによる更新とReviewerによる整合性確認を行う
+- [`verify-browser-ac`](.apm/skills/verify-browser-ac/SKILL.md): Playwright MCPでUIの受入条件を独立に確認し、操作結果・画像・未検証範囲を残す
 
 ## Ralph Runner
 

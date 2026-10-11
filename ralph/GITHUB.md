@@ -1,5 +1,7 @@
 # GitHub Workflow
 
+ManagerのUI受入用のPlaywright MCP接続・検証用Server設定・証跡・終了管理は [Managerの実ブラウザ検証](BROWSER.md) を参照する。
+
 ## 役割と実行境界
 
 RalphはWachaのClaimを取得し、Taskごとのworktreeを準備する。Agentは実装・レビュー・AC確認を行い、JSONで判断と根拠を返す。Gitのcommit/push、GitHubのPR作成・レビューコメント・merge、Wachaの状態遷移はホスト側のRalphが行う。Codexの`.git`書き込み制限を無効化する必要はない。
@@ -61,7 +63,7 @@ GitHub方式では、Project rootの`.ralph/config.json`に、Agentのsandbox外
 }
 ```
 
-コマンド例は利用先のscript・test fileに合わせる。既定は空配列で、未設定時はホスト実行を公開しない。設定したコマンドを自動で全件実行するのではなく、Agentが`ralph_verification` MCPの`run_host_verification({ command: [...] })`から必要なものを選ぶ。Claude Code・Codexへ同じstdio MCPを配信する。検証は同期的に終了を待ち、Claude CodeのMCP自動バックグラウンド化も無効にする（Claude Code 2.1.212以降）。
+コマンド例は利用先のscript・test fileに合わせる。既定は空配列で、未設定時はホスト実行を公開しない。設定したコマンドを自動で全件実行するのではなく、Agentが`ralph_verification` MCPの`run_host_verification({ command: [...] })`から必要なものを選ぶ。Projectの `.mcp.json` の追加MCPと、Claimに固定した検証用MCPを共通処理でまとめ、Claude Code・Codexへ配信する。ProviderはMCP名に応じた選択を行わない。設定方法は [MCP設定](MCP.md) を参照する。検証は同期的に終了を待ち、Claude CodeのMCP自動バックグラウンド化も無効にする（Claude Code 2.1.212以降）。
 
 コマンドと全引数を完全一致で照合し、cwdはClaimに紐づく登録済みTask Worktreeに固定する。shellによる文字列展開・連結は行わない。検証プロセスにはPATH・HOME・locale等の基本環境だけを渡し、PAT・Wacha Credential・SSH_AUTH_SOCK等は渡さない。設定はホスト側の正本を毎回読み、Worktree内の設定を許可元にしない。
 

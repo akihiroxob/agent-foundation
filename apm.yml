@@ -13,7 +13,7 @@ dependencies:
       registry: false
       transport: stdio
       command: npx
-      args: ["-y", "@playwright/mcp@0.0.83", "--isolated", "--headless"]
+      args: ["-y", "@playwright/mcp@latest", "--isolated", "--headless"]
 
 scripts:
   generate-runtime: "python3 scripts/generate_runtime_config.py"

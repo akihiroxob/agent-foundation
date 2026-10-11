@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/mcp_config.sh"
+
 PROVIDER_RESET_PARSER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/limit_reset.py"
 
 CODEX_BIN="${RALPH_AGENT_COMMAND:-$(jq -r '.codex.command // "codex"' "$RALPH_CONFIG_PATH")}"
@@ -30,6 +32,9 @@ provider_run() {
     --color never
   )
 
+  ralph_mcp_arguments codex "$project_root" || return 1
+  args+=(${RALPH_MCP_ARGS[@]+"${RALPH_MCP_ARGS[@]}"})
+
   if [[ -n "${RALPH_AGENT_MODEL:-}" ]]; then
     args+=(--model "$RALPH_AGENT_MODEL")
   fi
@@ -52,15 +57,6 @@ provider_run() {
   fi
 
   wacha_url_toml="$(jq -Rn --arg value "$WACHA_MCP_URL" '$value')"
-  if [[ "${GITHUB_ENABLED:-false}" == true ]] && jq -e '.mcpServers.ralph_verification' "$project_root/.ralph/mcp.json" >/dev/null; then
-    args+=(
-      -c "mcp_servers.ralph_verification.command=$(jq -c '.mcpServers.ralph_verification.command' "$project_root/.ralph/mcp.json")"
-      -c "mcp_servers.ralph_verification.args=$(jq -c '.mcpServers.ralph_verification.args' "$project_root/.ralph/mcp.json")"
-      -c 'mcp_servers.ralph_verification.default_tools_approval_mode="approve"'
-      -c 'mcp_servers.ralph_verification.required=true'
-      -c 'mcp_servers.ralph_verification.tool_timeout_sec=3660'
-    )
-  fi
   args+=(
     -c "mcp_servers.wacha.url=$wacha_url_toml"
     -c 'mcp_servers.wacha.bearer_token_env_var="WACHA_AGENT_NAME"'
