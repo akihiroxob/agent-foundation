@@ -4,7 +4,7 @@ Codex と Claude Code に共通のエージェント設定を配布するため�
 
 ## 方針
 
-- Skills・Instructions・Hooks は APM のプリミティブとして共通管理する
+- Skills・Instructions・Hooks・MCP依存は APM で共通管理する
 - Runtime policy は `policy/runtime-policy.json` を正本とする
 - Codex Rules / sandbox 設定と Claude Code permissions はアダプターで生成する
 - Ralph Runner はエージェントの外側でTask監視とプロセス起動を担当する
@@ -55,6 +55,18 @@ apm install akihiroxob/agent-harness#v0.1.0 --target codex,claude,agent-skills
 ```
 
 Runtime設定は、当面はこのリポジトリをcloneして生成した`dist/`からコピーします。将来的にはAPM lifecycle scriptや専用CLIで一括導入できます。
+
+## ブラウザ操作用MCP
+
+`apm.yml` の `dependencies.mcp` にPlaywright MCPを定義しています。`npx`で固定バージョン `0.0.83` を起動するため、Playwrightのグローバルインストールは不要です。Node.js 18以上とnpm（npx）、利用するブラウザ本体が必要です。初回起動時にはnpmパッケージの取得が発生します。
+
+起動オプションは `--isolated --headless` です。各MCPプロセスが独立した一時プロファイルを使用し、ブラウザ画面を表示せず動作します。ログイン状態は終了時に破棄されます。UIの見た目を確認するときは、Agentがスクリーンショットも取得してください。
+
+利用先ではAPMによるパッケージ導入時にMCP定義も展開します。依存パッケージの自己定義MCPに対してAPMが信頼確認を要求する場合は、利用先の `apm.yml` に同じPlaywright定義を直接記載して `apm install` を実行します。既定のChromeが導入されていない環境では、Playwright MCPの `browser_install` ツールでブラウザを準備できます。
+
+このMCPはブラウザ操作を提供します。検証対象アプリのServer起動は別途必要です。Ralph経由の実行では、ProviderのMCP設定読み込みと実行権限を確認してください。特にClaude Providerは厳格なMCP設定を使用するため、APMへの登録だけでRalphの全Providerへ接続済みになるわけではありません。
+
+参照: [APMのMCP導入](https://microsoft.github.io/apm/consumer/install-mcp-servers/)、[Playwright MCP](https://github.com/microsoft/playwright-mcp)。
 
 ## 同梱Skill
 

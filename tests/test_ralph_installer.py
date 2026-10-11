@@ -66,6 +66,7 @@ class RalphInstallerTest(unittest.TestCase):
             self.assertTrue((runtime_dir / "bin/ralph-loop").is_file())
             self.assertTrue((runtime_dir / "lib/git_credential.py").is_file())
             self.assertTrue((runtime_dir / "lib/host_verification.py").is_file())
+            self.assertTrue((runtime_dir / "lib/log_stream.py").is_file())
             self.assertTrue((runtime_dir / "examples/config.json").is_file())
             self.assertNotIn(".ralph", {path.name for path in root.iterdir()})
 
@@ -707,6 +708,12 @@ fi
             config["logging"]["idleHeartbeatSeconds"] = 2
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
+            log_path = target / ".ralph/logs/ralph.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("previous execution history\n", encoding="utf-8")
+            previous = time.time() - 86400
+            os.utime(log_path, (previous, previous))
+            suffix = time.strftime("%Y-%m-%d", time.gmtime(previous + 9 * 3600))
             process = subprocess.Popen(
                 [str(launcher), "run", "worker"],
                 cwd=target,
@@ -715,7 +722,6 @@ fi
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            log_path = target / ".ralph/logs/ralph.log"
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 if log_path.exists() and "待機中です。" in log_path.read_text(encoding="utf-8"):
@@ -726,6 +732,8 @@ fi
 
             self.assertEqual("", stderr)
             log = log_path.read_text(encoding="utf-8")
+            self.assertEqual("previous execution history\n", log_path.with_name(f"ralph.log.{suffix}").read_text(encoding="utf-8"))
+            self.assertEqual(0o600, log_path.stat().st_mode & 0o777)
             self.assertEqual(1, log.count("待機を開始します。"), f"stdout={stdout!r}")
             self.assertEqual(1, log.count("待機中です。"), f"stdout={stdout!r}")
             self.assertNotIn("秒待機します。", log)

@@ -7,6 +7,14 @@ targets:
   - claude
   - agent-skills
 
+dependencies:
+  mcp:
+    - name: playwright
+      registry: false
+      transport: stdio
+      command: npx
+      args: ["-y", "@playwright/mcp@0.0.83", "--isolated", "--headless"]
+
 scripts:
   generate-runtime: "python3 scripts/generate_runtime_config.py"
   check-runtime: "python3 scripts/generate_runtime_config.py --check"
