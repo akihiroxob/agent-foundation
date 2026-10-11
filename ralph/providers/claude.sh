@@ -59,6 +59,9 @@ provider_run() {
 
   (
     cd "$project_root"
+    if [[ "${GITHUB_ENABLED:-false}" == true ]] && jq -e '.mcpServers.ralph_verification' "$project_root/.ralph/mcp.json" >/dev/null; then
+      export CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0
+    fi
     exec "$CLAUDE_BIN" "${args[@]}" >"$output_pipe" 2>"$error_pipe"
   ) &
   PROVIDER_PID=$!

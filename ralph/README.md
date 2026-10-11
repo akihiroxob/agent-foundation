@@ -189,12 +189,16 @@ Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、W
 
 `initialSeconds`は通常エラー、`tokenLimitSeconds`はToken上限メッセージからReset時刻を取得できなかった場合のフォールバック待機時間です。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
 
-実行ログはコンソールへ表示しながら、プロジェクト共通の`.ralph/logs/ralph.log`へ追記します。各行には実行Role名が付きます。`.ralph/logs/`はGit管理対象外にしてください。
+実行ログはコンソールへ表示しながら、プロジェクト共通の`.ralph/logs/ralph.log`へ追記します。各行には日本時間の日時と実行Role名が付きます。stdout・stderrは1つのログ収集プロセスが順番にファイルへ記録し、コンソールの出力先は分けて保持します。`.ralph/logs/`はGit管理対象外にしてください。
 
 ```text
 [2026-09-20 10:00:00][worker] Worker対象: todo=1 available=1
 [2026-09-20 10:02:15][reviewer] Reviewer対象: in_review=1
 ```
+
+ログは日本時間の毎日0時を境に、次の書き込み時にローテートします。現在のファイルは`ralph.log`、過去のファイルは`ralph.log.YYYY-MM-DD`です。既定では過去20世代と現在のログを保持し、古い世代はローテート時に削除します。無出力の日はファイルが作られないため、20世代は必ずしも連続した20日ではありません。再起動後も既存ファイルへ追記し、導入時に既存ログを分割し直したり削除したりしません。新規ログファイルは所有者だけが読み書きできます。
+
+`logging.backupCount`は過去の保持世代数で、1以上の整数を指定します。未設定時は20です。日次の切替時刻とタイムゾーンは固定です。`github-state`・`verification`・Worktreeはログローテートの削除対象ではありません。
 
 保存先は設定で変更できます。プロジェクトルートからの相対パスまたは絶対パスを指定します。
 
@@ -202,7 +206,8 @@ Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、W
 {
   "logging": {
     "path": ".ralph/logs/ralph.log",
-    "idleHeartbeatSeconds": 3600
+    "idleHeartbeatSeconds": 3600,
+    "backupCount": 20
   }
 }
 ```

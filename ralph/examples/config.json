@@ -10,7 +10,8 @@
   },
   "logging": {
     "path": ".ralph/logs/ralph.log",
-    "idleHeartbeatSeconds": 3600
+    "idleHeartbeatSeconds": 3600,
+    "backupCount": 20
   },
   "wacha": {
     "url": "http://localhost:51743/mcp"
@@ -39,6 +40,9 @@
       "agentProvider": "claude",
       "model": ""
     }
+  },
+  "verification": {
+    "hostCommands": []
   },
   "github": {
     "enabled": false,

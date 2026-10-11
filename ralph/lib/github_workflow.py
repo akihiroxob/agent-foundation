@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -23,8 +24,8 @@ class RetryLater(WorkflowError):
     pass
 
 
-def run(*args: str, cwd: Path) -> str:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
+def run(*args: str, cwd: Path, env: dict | None = None) -> str:
+    result = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, check=False)
     if result.returncode:
         # Git stderr can contain credential-bearing remote URLs; don't echo it.
         raise WorkflowError(f"{args[0]} {args[1]} failed (exit {result.returncode})")
@@ -55,6 +56,22 @@ class Workflow:
 
     def save(self) -> None:
         atomic_json(self.state_path, self.state)
+
+    def host_commands(self) -> list[list[str]]:
+        if __package__:
+            from .host_verification import commands
+        else:
+            from host_verification import commands
+        return commands(self.config)
+
+    def agent_mcp_config(self, claim_id: str) -> dict:
+        servers = {"wacha": {"type": "http", "url": self.config["wacha"]["url"],
+            "headers": {"Authorization": "Bearer ${WACHA_AGENT_NAME}"}}}
+        if self.host_commands():
+            servers["ralph_verification"] = {"command": sys.executable, "args": [
+                str(Path(__file__).with_name("host_verification.py")), "--config", str(self.config_path),
+                "--role", self.role, "--claim-id", claim_id], "timeout": 3660000}
+        return {"mcpServers": servers}
 
     def request(self, url: str, token: str, method: str = "GET", body: dict | None = None) -> dict | list:
         headers = {"Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
@@ -113,12 +130,45 @@ class Workflow:
             "worker": "RALPH_GITHUB_TOKEN", "reviewer": "RALPH_GITHUB_TOKEN",
             "manager": "RALPH_GITHUB_TOKEN"})
 
-    def github(self, path: str, method: str = "GET", body: dict | None = None) -> dict | list:
+    def github_token(self) -> str:
         name = self.token_names().get(self.role)
         token = os.environ.get(name or "")
         if not token:
             raise WorkflowError(f"GitHub credential environment variable {name} is missing")
-        return self.request(f"https://api.github.com{path}", token, method, body)
+        return token
+
+    def github(self, path: str, method: str = "GET", body: dict | None = None) -> dict | list:
+        return self.request(f"https://api.github.com{path}", self.github_token(), method, body)
+
+    def git_remote(self, operation: str, refspec: str, cwd: Path) -> str:
+        if operation not in {"fetch", "push"}:
+            raise WorkflowError("Unsupported remote Git operation")
+        self.validate_remote()
+        repository = self.workflow["repository"]
+        url = f"https://github.com/{repository}.git"
+        # --get-url performs no network operation. Never send the token through
+        # a configured insteadOf rewrite to another host or back to SSH.
+        if run("git", "ls-remote", "--get-url", url, cwd=cwd) != url:
+            raise WorkflowError("Git URL rewrite changes the expected HTTPS repository")
+        if operation == "push":
+            rewrites = subprocess.run(("git", "config", "--null", "--get-regexp", r"^url\..*\.pushinsteadof$"),
+                cwd=cwd, capture_output=True, text=True, check=False)
+            if rewrites.returncode not in {0, 1}:
+                raise WorkflowError("Cannot inspect Git push URL rewrites")
+            if any(url.startswith(item.partition("\n")[2]) for item in rewrites.stdout.split("\0") if item):
+                raise WorkflowError("Git push URL rewrite changes the expected HTTPS repository")
+        environment = os.environ.copy()
+        for name in list(environment):
+            if name.startswith("GIT_TRACE") or name == "GIT_CURL_VERBOSE":
+                environment.pop(name)
+        environment.update({"RALPH_GIT_AUTH_TOKEN": self.github_token(),
+            "RALPH_GIT_REPOSITORY": repository, "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ASKPASS": "", "SSH_ASKPASS": ""})
+        helper = "!" + shlex.quote(sys.executable) + " " + shlex.quote(str(Path(__file__).with_name("git_credential.py")))
+        options = ("-c", "credential.helper=", "-c", f"credential.helper={helper}",
+            "-c", "credential.useHttpPath=true", "-c", "http.extraHeader=",
+            "-c", f"http.{url}.extraHeader=", "-c", "http.followRedirects=false")
+        return run("git", *options, operation, url, refspec, cwd=cwd, env=environment)
 
     def pages(self, path: str, key: str | None = None) -> list:
         result = []
@@ -142,6 +192,10 @@ class Workflow:
             raise WorkflowError("origin must match the Wacha Project GitHub repository")
 
     def prepare(self) -> dict:
+        self.host_commands()  # Reject invalid host configuration before acquiring a Claim.
+        self.retry_completed_cleanup()
+        if self.state.get("completed"):
+            return {**self.state, "pending": True}
         projects = self.mcp("list_projects", {})["projects"]
         project = next((item for item in projects if item["name"] == self.config["projectName"]), None)
         if not project or not project.get("workflow"):
@@ -154,9 +208,9 @@ class Workflow:
         if self.state:
             if self.state.get("pendingResult"):
                 if not self.state.get("finalCommand"):
-                    self.renew()
+                    self.renew_or_reclaim()
                 return {**self.state, "pending": True, "workflow": self.workflow}
-            self.renew()
+            self.renew_or_reclaim()
         else:
             self.validate_remote()
             if self.role != "manager":
@@ -177,7 +231,7 @@ class Workflow:
         history = self.mcp("list_task_pull_requests", {"taskId": self.state["task"]["id"]})["pullRequests"]
         self.state["pullRequests"] = history
         branch = self.workflow["baseBranch"]
-        run("git", "fetch", "origin", branch, cwd=self.root)
+        self.git_remote("fetch", f"refs/heads/{branch}:refs/remotes/origin/{branch}", self.root)
         if self.role == "worker":
             if history and history[-1]["state"] == "open":
                 pr = self.github(f"{self.repo_path()}/pulls/{history[-1]['number']}")
@@ -185,7 +239,7 @@ class Workflow:
                     if pr["head"]["repo"]["full_name"].lower() != self.workflow["repository"].lower():
                         raise WorkflowError("Ralph cannot push to a fork PR")
                     self.state["branch"] = pr["head"]["ref"]
-                    run("git", "fetch", "origin", f"refs/pull/{pr['number']}/head", cwd=self.root)
+                    self.git_remote("fetch", f"refs/pull/{pr['number']}/head", self.root)
                     start = pr["head"]["sha"]
                 else:
                     start = f"origin/{branch}"
@@ -198,7 +252,7 @@ class Workflow:
             pr = history[-1]
             if self.role == "reviewer":
                 remote_pr = self.github(f"{self.repo_path()}/pulls/{pr['number']}")
-                run("git", "fetch", "origin", f"refs/pull/{pr['number']}/head", cwd=self.root)
+                self.git_remote("fetch", f"refs/pull/{pr['number']}/head", self.root)
                 start = remote_pr["head"]["sha"]
                 self.state["expectedHeadSha"] = start
             else:
@@ -207,7 +261,8 @@ class Workflow:
                     raise WorkflowError("Acceptance requires a reviewed merged PR")
                 run("git", "merge-base", "--is-ancestor", start, f"origin/{branch}", cwd=self.root)
                 self.state["expectedMergeSha"] = start
-        directory = self.root / ".ralph" / "worktrees" / f"{self.role}-{self.state['task']['id']}-{self.state['claimId'][:8]}"
+        worktree_claim = self.state.setdefault("worktreeClaimId", self.state["claimId"])
+        directory = self.root / ".ralph" / "worktrees" / f"{self.role}-{self.state['task']['id']}-{worktree_claim[:8]}"
         if not directory.exists():
             directory.parent.mkdir(parents=True, exist_ok=True)
             arguments = ["git", "worktree", "add"]
@@ -232,17 +287,61 @@ class Workflow:
         self.state["resultPath"] = str(directory / ".ralph-result.json")
         self.state.setdefault("initialHeadSha", run("git", "rev-parse", "HEAD", cwd=directory))
         # Claude discovers MCP servers from its cwd. This contains only an env reference.
-        atomic_json(directory / ".ralph" / "mcp.json", {"mcpServers": {"wacha": {"type": "http",
-            "url": self.config["wacha"]["url"], "headers": {"Authorization": "Bearer ${WACHA_AGENT_NAME}"}}}})
+        self.state["mcpClaimId"] = self.state["claimId"]
+        self.state["agentMcpConfig"] = self.agent_mcp_config(self.state["mcpClaimId"])
+        atomic_json(directory / ".ralph" / "mcp.json", self.state["agentMcpConfig"])
         result_path = Path(self.state["resultPath"])
         result_path.unlink(missing_ok=True)
         self.save()
-        return {**self.state, "workflow": self.workflow}
+        return {**self.state, "workflow": self.workflow, "hostVerificationCommands": self.host_commands()}
 
     def renew(self) -> None:
         if self.state:
             # renew_claim has no taskId argument.
             self.mcp("renew_claim", {"claimId": self.state["claimId"]})
+
+    def renew_or_reclaim(self) -> None:
+        if not self.state:
+            return
+        expected = {"worker": "doing", "reviewer": "in_review", "manager": "wait_accept"}[self.role]
+        if self.state.get("claimRecovery"):
+            # A previous request may have succeeded without returning its response.
+            # Check requirements again, but don't reject our own active Claim;
+            # replaying the saved requestId retrieves its receipt.
+            tasks = self.mcp("list_tasks", {"projectId": self.state["projectId"],
+                "filter": {"status": [expected]}})["tasks"]
+            candidate = next((task for task in tasks if task["id"] == self.state["task"]["id"]), None)
+            if not candidate or any(candidate.get(key) != self.state["task"].get(key) for key in ("title", "description", "storyId")):
+                raise WorkflowError("Task phase or requirements changed during Claim recovery; execution retained")
+        if not self.state.get("claimRecovery"):
+            try:
+                self.renew()
+                return
+            except WorkflowError as error:
+                if "CLAIM_EXPIRED" not in str(error):
+                    raise
+            availability = {"worker": "work", "reviewer": "review", "manager": "acceptance"}[self.role]
+            tasks = self.mcp("list_tasks", {"projectId": self.state["projectId"],
+                "filter": {"availableFor": availability}})["tasks"]
+            candidate = next((task for task in tasks if task["id"] == self.state["task"]["id"]), None)
+            if not candidate or candidate["status"] != expected or (self.role == "worker" and not candidate.get("reclaimable")):
+                raise WorkflowError("Expired Claim cannot be reacquired: Task is unavailable or its phase changed; execution retained")
+            if any(candidate.get(key) != self.state["task"].get(key) for key in ("title", "description", "storyId")):
+                raise WorkflowError("Task requirements changed after Claim expiry; execution retained for operator review")
+            self.state["claimRecovery"] = {"requestId": f"ralph:reclaim:{self.role}:{os.urandom(16).hex()}"}
+            self.save()  # Retry a lost response with the same requestId.
+        operation = {"worker": "claim_task", "reviewer": "claim_review", "manager": "claim_acceptance"}[self.role]
+        claim = self.mcp(operation, {"taskId": self.state["task"]["id"],
+            "requestId": self.state["claimRecovery"]["requestId"]})
+        old_claim = self.state["claimId"]
+        self.state.setdefault("worktreeClaimId", old_claim)
+        self.state.setdefault("previousClaimIds", []).append(old_claim)
+        self.state["claimId"] = claim["claimId"]
+        self.state.pop("claimRecovery", None)
+        self.state.pop("reviewCommentId", None)  # Evidence is bound to the Review Claim.
+        self.state.pop("finalCommand", None)  # Revalidate and submit under the new Claim.
+        self.save()
+        self.renew()
 
     def note(self, text: str) -> None:
         self.command("add_task_comment", {"body": text})
@@ -255,16 +354,99 @@ class Workflow:
     def clear(self) -> None:
         self.state_path.unlink(missing_ok=True)
 
+    def cleanup_worktree(self, execution: dict) -> str:
+        """Remove only this runner's clean, completed checkout; never force removal."""
+        operations = {"worker": {"complete_task"}, "reviewer": {"reviewed_task", "reject_task"},
+                      "manager": {"accept_task", "reject_task"}}
+        if not execution.get("completed") or execution.get("finalCommand", {}).get("name") not in operations[self.role]:
+            raise WorkflowError("Execution is not successfully completed")
+        directory = Path(execution["cwd"])
+        worktree_claim = execution.get("worktreeClaimId", execution["claimId"])
+        expected = self.root / ".ralph" / "worktrees" / f"{self.role}-{execution['task']['id']}-{worktree_claim[:8]}"
+        if directory != expected or directory.resolve() != expected.absolute():
+            raise WorkflowError("Worktree path is not the expected Ralph checkout")
+        if not directory.exists():
+            return "removed"
+        registered = run("git", "worktree", "list", "--porcelain", "-z", cwd=self.root).split("\0")
+        if f"worktree {directory}" not in registered:
+            raise WorkflowError("Checkout is not a registered Ralph worktree")
+        sha = execution.get({"worker": "commitSha", "reviewer": "expectedHeadSha", "manager": "expectedMergeSha"}[self.role])
+        if not sha or run("git", "rev-parse", "HEAD", cwd=directory) != sha:
+            raise WorkflowError("Worktree contains an unexpected commit")
+        if run("git", "status", "--porcelain", "--untracked-files=no", cwd=directory):
+            raise WorkflowError("Worktree contains uncommitted changes")
+        runtime_paths = {".ralph/mcp.json", ".ralph-result.json"}
+        untracked = set(run("git", "ls-files", "--others", "--exclude-standard", "-z", cwd=directory).split("\0")) - {""}
+        if untracked - runtime_paths:
+            raise WorkflowError("Worktree contains untracked files")
+        tracked = set(run("git", "ls-files", "-z", cwd=directory).split("\0"))
+        if tracked & runtime_paths or (directory / ".ralph").is_symlink():
+            raise WorkflowError("Runner files are tracked or redirected")
+        # git worktree remove refuses untracked runner files, so remove only the
+        # two known JSON artifacts after persisting their result outside the checkout.
+        for relative in runtime_paths:
+            path = directory / relative
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise WorkflowError("Runner artifact is not a regular file")
+            if path.exists():
+                expected_json = execution.get("pendingResult") if relative == ".ralph-result.json" else execution.get("agentMcpConfig", {
+                    "mcpServers": {"wacha": {"type": "http", "url": self.config["wacha"]["url"],
+                        "headers": {"Authorization": "Bearer ${WACHA_AGENT_NAME}"}}}})
+                try:
+                    actual_json = json.loads(path.read_text(encoding="utf-8"))
+                except (ValueError, UnicodeError) as error:
+                    raise WorkflowError("Runner artifact contains unexpected content") from error
+                if actual_json != expected_json:
+                    raise WorkflowError("Runner artifact changed after completion")
+        for relative in runtime_paths:
+            (directory / relative).unlink(missing_ok=True)
+        run("git", "worktree", "remove", str(directory), cwd=self.root)
+        return "removed"
+
+    def cleanup_record(self, path: Path, execution: dict) -> None:
+        try:
+            execution["cleanup"] = self.cleanup_worktree(execution)
+            execution.pop("cleanupError", None)
+        except (WorkflowError, OSError) as error:
+            execution["cleanup"] = "retained"
+            execution["cleanupError"] = str(error)
+            print(f"{self.role}: completed worktree retained; {error}", file=sys.stderr)
+        atomic_json(path, execution)
+
+    def retry_completed_cleanup(self) -> None:
+        for path in (self.state_path.parent / "completed").glob(f"{self.role}-*.json"):
+            execution = json.loads(path.read_text(encoding="utf-8"))
+            if execution.get("completed") and execution.get("cleanup") != "removed":
+                self.cleanup_record(path, execution)
+
+    def complete_execution(self) -> None:
+        # Persist success before cleanup so a crash never renews a completed Claim
+        # or reruns the Agent. The final result remains available after removal.
+        self.state["completed"] = True
+        self.save()
+        archive = self.state_path.parent / "completed" / f"{self.role}-{self.state['claimId']}.json"
+        atomic_json(archive, self.state)
+        self.cleanup_record(archive, self.state)
+        self.clear()
+
     def finish(self) -> None:
         if not self.state:
             raise WorkflowError("No active GitHub execution")
+        if self.state.get("completed"):
+            self.complete_execution()
+            return
         if self.state.get("finalCommand"):
             operation = self.state["finalCommand"]
-            self.command(operation["name"], operation["extra"])
-            self.clear()
-            return
+            try:
+                self.command(operation["name"], operation["extra"])
+                self.complete_execution()
+                return
+            except WorkflowError as error:
+                if "CLAIM_EXPIRED" not in str(error):
+                    raise
         project = next(item for item in self.mcp("list_projects", {})["projects"] if item["id"] == self.state["projectId"])
         self.workflow = project["workflow"]
+        self.renew_or_reclaim()
         result = self.state.get("pendingResult")
         if not result:
             path = Path(self.state["resultPath"])
@@ -295,7 +477,7 @@ class Workflow:
                 self.transition("reject_task", {"reason": result["summary"]})
         else:
             raise WorkflowError(f"Invalid {self.role} decision")
-        self.clear()
+        self.complete_execution()
 
     def finish_worker(self, result: dict) -> None:
         cwd = Path(self.state["cwd"])
@@ -303,7 +485,8 @@ class Workflow:
             head = run("git", "rev-parse", "HEAD", cwd=cwd)
             if head != self.state["initialHeadSha"]:
                 message = run("git", "log", "-1", "--format=%B", cwd=cwd)
-                if f"Wacha-Claim: {self.state['claimId']}" not in message:
+                claim_ids = [self.state["claimId"], *self.state.get("previousClaimIds", [])]
+                if not any(f"Wacha-Claim: {claim}" in message.splitlines() for claim in claim_ids):
                     raise WorkflowError("Unexpected commit in worker worktree")
                 self.state["commitSha"] = head
                 self.save()
@@ -318,8 +501,22 @@ class Workflow:
                     raise WorkflowError("Invalid commit manifest path")
                 if not (cwd / path).resolve().is_relative_to(cwd.resolve()):
                     raise WorkflowError("Commit path escapes worktree")
-            run("git", "add", "--", *files, cwd=cwd)
-            staged = set(run("git", "diff", "--cached", "--name-only", cwd=cwd).splitlines())
+            # git mv / git rm may already have removed the source from the index.
+            # Keep those deletions in the manifest, but do not add them a second time.
+            indexed = set(run("git", "ls-files", "-z", cwd=cwd).split("\0"))
+            deleted = set(run("git", "diff", "--cached", "--no-renames", "--diff-filter=D",
+                "--name-only", "-z", cwd=cwd).split("\0"))
+            to_add = []
+            for file in files:
+                path = cwd / file
+                if path.exists() or path.is_symlink() or file in indexed:
+                    to_add.append(file)
+                elif file not in deleted:
+                    raise WorkflowError("Commit manifest path is missing and is not a staged deletion")
+            if to_add:
+                run("git", "add", "--", *to_add, cwd=cwd)
+            # Disabling rename detection checks both source and destination paths.
+            staged = set(run("git", "diff", "--cached", "--no-renames", "--name-only", "-z", cwd=cwd).split("\0")) - {""}
             if not staged or not staged.issubset(set(files)):
                 raise WorkflowError("Staged paths must match the explicit file manifest")
             if run("git", "diff", "--name-only", cwd=cwd):
@@ -332,13 +529,13 @@ class Workflow:
             self.state["commitSha"] = run("git", "rev-parse", "HEAD", cwd=cwd)
             self.save()
         self.renew()
-        run("git", "push", "origin", f"HEAD:refs/heads/{self.state['branch']}", cwd=cwd)
+        self.git_remote("push", f"HEAD:refs/heads/{self.state['branch']}", cwd)
         if not self.state.get("prNumber"):
             owner = self.workflow["repository"].split("/")[0]
             query = urllib.parse.urlencode({"head": f"{owner}:{self.state['branch']}", "base": self.workflow["baseBranch"], "state": "open"})
             prs = self.github(f"{self.repo_path()}/pulls?{query}")
             pr = prs[0] if prs else self.github(f"{self.repo_path()}/pulls", "POST", {
-                "title": self.state["task"]["title"], "body": f"Wacha Task: {self.state['task']['id']}\n\n{result['summary']}",
+                "title": self.state["task"]["title"], "body": f"## 実装報告\n\n{result['summary']}\n\n---\n\n- Wacha Task: `{self.state['task']['id']}`",
                 "head": self.state["branch"], "base": self.workflow["baseBranch"]})
             self.state["prNumber"] = pr["number"]
             self.save()
@@ -396,7 +593,9 @@ class Workflow:
         previous = next((review for review in reversed(reviews) if marker in review.get("body", "")), None)
         if previous:
             return previous["id"]
-        text = f"### Reviewer: {self.principal}\n\nTask: {self.state['task']['id']}\nHead: `{sha}`\nDecision: **{decision}**\n\n{body}\n\n{marker}"
+        text = (f"## レビュー結果: **{decision}**\n\n{body}\n\n---\n\n"
+            f"- Reviewer: {self.principal}\n- Task: `{self.state['task']['id']}`\n"
+            f"- Head: `{sha}`\n\n{marker}")
         review = self.github(comments_path, "POST", {"body": text})
         return review["id"]
 
@@ -414,6 +613,10 @@ class Workflow:
         self.state_path.rename(archive)
 
     def release_on_error(self, reason: str) -> None:
+        # A failed result application must remain resumable, including when a
+        # subsequent prepare/renew discovers that its Claim has expired.
+        if self.state.get("executionError") or self.state.get("claimRecovery") or "CLAIM_EXPIRED" in reason or "execution retained" in reason:
+            return
         if self.state and not self.state.get("pendingResult"):
             try:
                 self.note(reason)
@@ -451,7 +654,11 @@ def main() -> int:
         print(str(error), file=sys.stderr)
         return 75
     except (WorkflowError, ValueError, KeyError, OSError) as error:
-        workflow.release_on_error(str(error))
+        if args.command == "finish" and workflow.state and workflow.state_path.exists():
+            workflow.state["executionError"] = {"phase": "finish", "reason": str(error), "occurredAt": int(time.time() * 1000)}
+            workflow.save()
+        else:
+            workflow.release_on_error(str(error))
         print(str(error), file=sys.stderr)
         return 78
 

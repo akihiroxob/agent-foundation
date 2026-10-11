@@ -8,6 +8,19 @@ RalphがAcceptance Claimとマージcommitの専用worktreeを用意済みです
 3. Contextの`resultPath`へJSONを出力する。満たしていれば`decision: accept`、不足があれば`decision: reject`。
    `summary`にはACごとの根拠、実施・未実施の検証、不足の場合は修正条件を記載する。
 
+`summary`はMarkdown文字列にし、`### ACとの対応`・`### 検証結果`・`### 不足・修正条件`・`### 未検証`の見出しと短い箇条書きで整理する。見出しとリストの前後には空行を入れ、コマンド・path・識別子はバッククォートで囲む。報告全体をコードブロックで囲まない。JSONの改行は`\n`としてエンコードし、読み込んだ文字列が実際の改行になるようにする。
+
 Gitの変更、GitHub操作、Claimの取得、Wachaのaccept/reject/releaseはRalphが担うため実行しない。
 差し戻されたTaskは最新の統合branchを基点に、新しいPRで修正される。重大な回帰はrevertの要否を報告に記載する。
-環境問題は`decision: blocked`と具体的な`summary`を出力する。JSON出力後、終了する。
+環境問題は`decision: blocked`と具体的な`summary`を出力する。
+
+## 終了前の確認
+
+- 検証をバックグラウンドで起動した場合も、待機・結果取得ツールで完了と終了コードを取得する。通知待ちの返答だけで終了しない。
+- 検証完了を確認できない場合は`decision: blocked`にし、未完了の検証と理由を記録する。成功扱いにしない。
+- Contextの`resultPath`へJSONを書き、読み戻して解析できること、`decision`と`summary`が揃っていることを確認してから終了する。最終回答だけでは完了にならない。
+- Contextに`executionError`がある場合は、前回の停止理由と既存の検証状況を確認して引き継ぐ。
+
+## ホスト側の検証
+
+Contextの`hostVerificationCommands`に必要な検証が登録されていれば、`ralph_verification` MCPの`run_host_verification`を使う。`command`には登録済み配列をそのまま指定し、追加引数やcwdを指定しない。終了コードとログを読み、成功・失敗・skipを区別してsummaryに記録pathを含める。対象HEADと変更内容が検証時から変わっていないことを確認する。sandbox内のEPERMでskipされた検証も、ホスト側で実施できた範囲はその証拠を使う。未登録のコマンドをホストで実行しない。サーバーの起動・検証・停止まで完結するコマンドを使う。

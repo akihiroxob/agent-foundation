@@ -52,6 +52,15 @@ provider_run() {
   fi
 
   wacha_url_toml="$(jq -Rn --arg value "$WACHA_MCP_URL" '$value')"
+  if [[ "${GITHUB_ENABLED:-false}" == true ]] && jq -e '.mcpServers.ralph_verification' "$project_root/.ralph/mcp.json" >/dev/null; then
+    args+=(
+      -c "mcp_servers.ralph_verification.command=$(jq -c '.mcpServers.ralph_verification.command' "$project_root/.ralph/mcp.json")"
+      -c "mcp_servers.ralph_verification.args=$(jq -c '.mcpServers.ralph_verification.args' "$project_root/.ralph/mcp.json")"
+      -c 'mcp_servers.ralph_verification.default_tools_approval_mode="approve"'
+      -c 'mcp_servers.ralph_verification.required=true'
+      -c 'mcp_servers.ralph_verification.tool_timeout_sec=3660'
+    )
+  fi
   args+=(
     -c "mcp_servers.wacha.url=$wacha_url_toml"
     -c 'mcp_servers.wacha.bearer_token_env_var="WACHA_AGENT_NAME"'
