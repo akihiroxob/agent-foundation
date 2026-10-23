@@ -138,7 +138,10 @@ class BrowserPreviewTest(unittest.TestCase):
             while process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.05)
         self.assertIsNotNone(process.poll())
-        self.assertEqual(self.server.preview.record["status"], "claim_invalid")
+        # Process exit precedes the monitor's record update; wait for stop() to finish.
+        with self.server.preview.lock:
+            self.assertEqual(self.server.preview.record["status"], "claim_invalid")
+            self.assertEqual(json.loads(self.server.preview.record_path.read_text())["status"], "claim_invalid")
 
     def test_session_timeout_stops_running_server(self):
         self.require_loopback()
@@ -149,7 +152,9 @@ class BrowserPreviewTest(unittest.TestCase):
             while process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.02)
         self.assertIsNotNone(process.poll())
-        self.assertEqual(self.server.preview.record["status"], "timeout")
+        with self.server.preview.lock:
+            self.assertEqual(self.server.preview.record["status"], "timeout")
+            self.assertEqual(json.loads(self.server.preview.record_path.read_text())["status"], "timeout")
 
     def test_mcp_disconnect_stops_preview_without_agent_cleanup(self):
         self.require_loopback()
