@@ -79,6 +79,24 @@ class RalphInstallerTest(unittest.TestCase):
         ]
         subprocess.run(["bash", "-n", *map(str, shell_files)], check=True)
 
+    def test_invalid_role_is_rejected_before_runner_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            launcher, runtime = install_global(target / "share", target / "bin")
+            for roles in (["auto"], ["reviewr"], ["worker", "auto"]):
+                with self.subTest(roles=roles):
+                    result = subprocess.run([str(launcher), "run", *roles,
+                                             "--project-root", str(target)],
+                                            capture_output=True, text=True)
+                    self.assertEqual(2, result.returncode)
+                    self.assertIn("invalid choice", result.stderr)
+                    self.assertFalse((target / ".ralph/runner.pid").exists())
+                    result = subprocess.run([str(runtime / "bin/ralph-loop"), *roles],
+                                            cwd=target, capture_output=True, text=True)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("使い方", result.stderr)
+                    self.assertFalse((target / ".ralph").exists())
+
     def test_manager_runs_only_for_unclaimed_wait_accept_task(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"
@@ -135,7 +153,7 @@ touch "$RALPH_TEST_STATE_DIR/started"
                 deadline = time.monotonic() + 5
                 while not (Path(directory) / "requests").exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
-                log_path = target / ".ralph/logs/ralph.log"
+                log_path = target / f".ralph/logs/ralph.{time.strftime('%Y-%m-%d', time.gmtime(time.time() + 9 * 3600))}.log"
                 while (not log_path.exists() or "待機を開始します" not in log_path.read_text(encoding="utf-8")) and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertFalse((Path(directory) / "started").exists())
@@ -154,6 +172,22 @@ touch "$RALPH_TEST_STATE_DIR/started"
             self.assertNotIn('"limit":1', requests)
 
     def test_auto_run_prioritizes_acceptance_review_rejection_and_new_work(self):
+        self.assert_role_selection([], ["manager-node-001", "reviewer-node-001",
+                                        "worker-node-001", "worker-node-001"],
+                                   [False, False, True, False],
+                                   ["acceptance", "review", "work"])
+
+    def test_multiple_roles_exclude_worker_and_keep_standard_priority(self):
+        self.assert_role_selection(["reviewer", "manager"],
+                                   ["manager-node-001", "reviewer-node-001"],
+                                   [False, False], ["acceptance", "review"])
+
+    def test_duplicate_roles_are_deduplicated(self):
+        self.assert_role_selection(["reviewer", "manager", "reviewer"],
+                                   ["manager-node-001", "reviewer-node-001"],
+                                   [False, False], ["acceptance", "review"])
+
+    def assert_role_selection(self, roles, expected_agents, expected_rejected, expected_filters):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"
             bin_dir = Path(directory) / "bin"
@@ -217,7 +251,7 @@ with (root / "runs").open("a") as output:
     output.write(json.dumps({"agent": role, "rejected_first": "`rejected` Taskを優先" in prompt}) + "\\n")
 phase = int((root / "phase").read_text()) if (root / "phase").exists() else 0
 (root / "phase").write_text(str(phase + 1))
-if phase == 3:
+if phase == int(os.environ["RALPH_TEST_RUN_COUNT"]) - 1:
     (root / "done").touch()
 """,
                 encoding="utf-8",
@@ -238,6 +272,8 @@ with (root / "runs").open("a") as output:
                              "rejected_first": "`rejected` Taskを優先" in prompt}) + "\\n")
 phase = int((root / "phase").read_text())
 (root / "phase").write_text(str(phase + 1))
+if phase == int(os.environ["RALPH_TEST_RUN_COUNT"]) - 1:
+    (root / "done").touch()
 """,
                 encoding="utf-8",
             )
@@ -246,6 +282,7 @@ phase = int((root / "phase").read_text())
             environment = os.environ.copy()
             environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
             environment["RALPH_TEST_STATE_DIR"] = directory
+            environment["RALPH_TEST_RUN_COUNT"] = str(len(expected_agents))
             subprocess.run([str(launcher), "init"], cwd=target, env=environment, check=True, capture_output=True)
             config_path = target / ".ralph/config.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -255,7 +292,7 @@ phase = int((root / "phase").read_text())
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
             process = subprocess.Popen(
-                [str(launcher), "run"], cwd=target, env=environment,
+                [str(launcher), "run", *roles], cwd=target, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
             try:
@@ -269,15 +306,15 @@ phase = int((root / "phase").read_text())
             self.assertTrue((Path(directory) / "done").exists(), f"stdout={stdout!r} stderr={stderr!r}")
             runs = [json.loads(line) for line in (Path(directory) / "runs").read_text().splitlines()]
             self.assertEqual(
-                ["manager-node-001", "reviewer-node-001", "worker-node-001", "worker-node-001"],
+                expected_agents,
                 [run["agent"] for run in runs],
             )
-            self.assertEqual([False, False, True, False], [run["rejected_first"] for run in runs])
+            self.assertEqual(expected_rejected, [run["rejected_first"] for run in runs])
             requests = [json.loads(line) for line in (Path(directory) / "requests").read_text().splitlines()]
             self.assertTrue(all("limit" not in request for request in requests))
             self.assertEqual("acceptance", requests[0]["filter"]["availableFor"])
-            self.assertIn("review", [request["filter"]["availableFor"] for request in requests])
-            self.assertIn("work", [request["filter"]["availableFor"] for request in requests])
+            self.assertEqual(set(expected_filters),
+                             {request["filter"]["availableFor"] for request in requests})
 
     def test_auto_run_uses_reviewer_while_manager_waits_for_token_reset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -482,15 +519,15 @@ exit 0
             self.assertIn("終了コード 42", stderr)
             self.assertIn("1秒後に再試行", stderr)
             timestamp_pattern = re.compile(
-                r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\[worker\] "
+                r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\[worker:worker-node-001\] "
             )
             self.assertTrue(all(timestamp_pattern.match(line) for line in stdout.splitlines()))
             self.assertTrue(all(timestamp_pattern.match(line) for line in stderr.splitlines()))
-            log_path = target / ".ralph/logs/ralph.log"
+            log_path = target / f".ralph/logs/ralph.{time.strftime('%Y-%m-%d', time.gmtime(time.time() + 9 * 3600))}.log"
             self.assertTrue(log_path.is_file())
             log = log_path.read_text(encoding="utf-8")
-            self.assertIn("[worker] Worker対象: todo=1", log)
-            self.assertIn("[worker] You've hit your limit", log)
+            self.assertIn("[worker:worker-node-001] Worker対象: todo=1", log)
+            self.assertIn("[worker:worker-node-001] You've hit your limit", log)
             claude_args = (Path(directory) / "claude-args").read_text(encoding="utf-8").splitlines()
             model_index = claude_args.index("--model")
             self.assertEqual("test-claude-model", claude_args[model_index + 1])
@@ -708,8 +745,9 @@ fi
             config["logging"]["idleHeartbeatSeconds"] = 2
             config_path.write_text(json.dumps(config), encoding="utf-8")
 
-            log_path = target / ".ralph/logs/ralph.log"
+            log_path = target / f".ralph/logs/ralph.{time.strftime('%Y-%m-%d', time.gmtime(time.time() + 9 * 3600))}.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.touch(mode=0o600)
             log_path.write_text("previous execution history\n", encoding="utf-8")
             previous = time.time() - 86400
             os.utime(log_path, (previous, previous))
@@ -732,7 +770,7 @@ fi
 
             self.assertEqual("", stderr)
             log = log_path.read_text(encoding="utf-8")
-            self.assertEqual("previous execution history\n", log_path.with_name(f"ralph.log.{suffix}").read_text(encoding="utf-8"))
+            self.assertTrue(log.startswith("previous execution history\n"))
             self.assertEqual(0o600, log_path.stat().st_mode & 0o777)
             self.assertEqual(1, log.count("待機を開始します。"), f"stdout={stdout!r}")
             self.assertEqual(1, log.count("待機中です。"), f"stdout={stdout!r}")

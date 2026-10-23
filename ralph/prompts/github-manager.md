@@ -10,7 +10,7 @@ RalphがAcceptance Claimとマージcommitの専用worktreeを用意済みです
 
 `summary`はMarkdown文字列にし、`### ACとの対応`・`### 検証結果`・`### 不足・修正条件`・`### 未検証`の見出しと短い箇条書きで整理する。見出しとリストの前後には空行を入れ、コマンド・path・識別子はバッククォートで囲む。報告全体をコードブロックで囲まない。JSONの改行は`\n`としてエンコードし、読み込んだ文字列が実際の改行になるようにする。
 
-Gitの変更、GitHub操作、Claimの取得、Wachaのaccept/reject/releaseはRalphが担うため実行しない。
+実行ContextのTask/Claimの取得・変更・解放、Gitの変更、GitHub操作、実運用のaccept/rejectはRalphが担うため実行しない。RepositoryのPolicyが明示的に許可する専用プレビュー内の検証データ操作は、この実行管理操作と区別する。検証用Task・Claim等が不足した場合は、許可された主体・API・範囲で準備してから確認する。実運用のMCPと専用プレビューのAPIを混同しない。
 差し戻されたTaskは最新の統合branchを基点に、新しいPRで修正される。重大な回帰はrevertの要否を報告に記載する。
 環境問題は`decision: blocked`と具体的な`summary`を出力する。
 

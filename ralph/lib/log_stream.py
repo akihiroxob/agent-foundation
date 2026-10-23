@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Serialize Ralph stdout/stderr and rotate the shared log at midnight in Japan."""
+"""Append Ralph streams directly to dated files without rename-based rotation."""
 from __future__ import annotations
 
 import argparse
 import logging
-from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import queue
@@ -13,20 +13,60 @@ import threading
 import time
 
 
-class DailyLogHandler(TimedRotatingFileHandler):
-    def handleError(self, record: logging.LogRecord) -> None:
-        # A failed file write must not be silently reported as successful logging.
-        raise
+JST = timezone(timedelta(hours=9))
+
+
+class DailyLogHandler(logging.Handler):
+    def __init__(self, path: Path, backup_count: int):
+        super().__init__()
+        self.path = path
+        self.backup_count = backup_count
+        self.last_cleanup = None
+
+    def dated_path(self, date: str) -> Path:
+        return self.path.with_name(f"{self.path.stem}.{date}{self.path.suffix}")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        day = datetime.fromtimestamp(record.created, JST).date()
+        path = self.dated_path(day.isoformat())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        try:
+            data = (self.format(record) + "\n").encode("utf-8")
+            while data:
+                written = os.write(descriptor, data)
+                if not written:
+                    raise OSError("Log append wrote no bytes")
+                data = data[written:]
+        finally:
+            os.close(descriptor)
+        if self.last_cleanup != day:
+            self.prune(day)
+            self.last_cleanup = day
+
+    def prune(self, today) -> None:
+        # No rename and no shared open file handle. Concurrent deletion is idempotent.
+        prefix, suffix = self.path.stem + ".", self.path.suffix
+        for path in self.path.parent.iterdir():
+            if not path.name.startswith(prefix) or not path.name.endswith(suffix) or not path.is_file():
+                continue
+            name = path.name[len(prefix):len(path.name) - len(suffix)] if suffix else path.name[len(prefix):]
+            try:
+                date = datetime.strptime(name, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if name != date.isoformat():
+                continue
+            if date < today - timedelta(days=self.backup_count):
+                path.unlink(missing_ok=True)
 
 
 def create_handler(path: Path, backup_count: int = 20) -> DailyLogHandler:
     if isinstance(backup_count, bool) or not isinstance(backup_count, int) or backup_count < 1:
         raise ValueError("logging.backupCount must be a positive integer")
-    # Only this dedicated process changes TZ. The Agent/Runner environment is unchanged.
     os.environ["TZ"] = "JST-9"
     time.tzset()
-    handler = DailyLogHandler(path, when="midnight", interval=1, backupCount=backup_count,
-        encoding="utf-8", utc=False)
+    handler = DailyLogHandler(path, backup_count)
     handler.setFormatter(logging.Formatter("[%(asctime)s][%(role)s] %(message)s", "%Y-%m-%d %H:%M:%S"))
     return handler
 

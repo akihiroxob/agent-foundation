@@ -25,14 +25,14 @@ class HostVerificationTest(unittest.TestCase):
         (self.root / "app.txt").write_text("initial\n")
         run("git", "add", ".", cwd=self.root)
         run("git", "commit", "-m", "Initial", cwd=self.root)
-        self.cwd = self.root / ".ralph/worktrees/worker-task-claim123"
+        self.cwd = self.root / ".ralph/worktrees/worker/worker"
         run("git", "worktree", "add", "--detach", str(self.cwd), "HEAD", cwd=self.root)
         self.config = self.root / ".ralph/config.json"
         self.command = [sys.executable, "-c", "import os; print(os.getcwd()); print(os.environ.get('CUSTOM_SECRET_TOKEN','absent'))"]
         atomic_json(self.config, {"roles": {"worker": {"agentName": "worker"}}, "wacha": {"url": "http://unused/mcp"},
             "verification": {"hostCommands": [self.command]}})
         self.state = {"claimId": "claim123", "task": {"id": "task"}, "cwd": str(self.cwd)}
-        self.state_path = self.root / ".ralph/github-state/worker.json"
+        self.state_path = self.root / ".ralph/github-state/worker/worker.json"
         atomic_json(self.state_path, self.state)
         self.server = VerificationServer(self.config, "worker", "claim123")
         self.renewal = patch.object(Workflow, "renew")
@@ -104,9 +104,18 @@ class HostVerificationTest(unittest.TestCase):
         self.assertEqual(result["structuredContent"]["cwd"], str(self.cwd))
         workflow = Workflow(self.config, "worker")
         config = workflow.agent_mcp_config("claim123")
-        self.assertEqual(config["mcpServers"]["ralph_verification"]["args"][-2:], ["--claim-id", "claim123"])
+        self.assertEqual(config["mcpServers"]["ralph_verification"]["args"][-2:], ["--principal", "worker"])
         self.assertEqual(config["mcpServers"]["ralph_verification"]["timeout"], 3660000)
         self.assertIsNone(self.server.handle({"method": "notifications/initialized"}))
+
+    def test_verification_cannot_read_another_principals_execution(self):
+        other = VerificationServer(self.config, "worker", "claim123", "other-worker")
+        with self.assertRaisesRegex(WorkflowError, "active execution"):
+            other.active_workflow()
+        other_workflow = Workflow(self.config, "worker", "other-worker")
+        atomic_json(other_workflow.state_path, self.state)
+        with self.assertRaisesRegex(WorkflowError, "registered Task worktree"):
+            other.active_workflow()
 
     def test_actual_loopback_server_command(self):
         probe = socket.socket()

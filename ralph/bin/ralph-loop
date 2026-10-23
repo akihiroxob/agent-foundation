@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-使い方: ralph-loop [--config PATH] <auto|worker|reviewer|manager>
+使い方: ralph-loop [--config PATH] [worker|reviewer|manager ...]
 EOF
   exit 1
 }
@@ -49,7 +49,6 @@ setup_logging() {
   previous_umask="$(umask)"
   umask 077
   mkdir -p "$(dirname "$RALPH_LOG_FILE")"
-  [[ -e "$RALPH_LOG_FILE" ]] || touch "$RALPH_LOG_FILE"
   umask "$previous_umask"
 
   RALPH_LOG_PIPE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ralph-log.XXXXXX")"
@@ -101,12 +100,23 @@ if [[ "${1:-}" == "--config" ]]; then
   shift 2
 fi
 
-mode="${1:-}"
-case "$mode" in
-  auto | worker | reviewer | manager) ;;
-  *) usage ;;
-esac
-[[ $# -eq 1 ]] || usage
+# Validate before creating runtime files. Deduplicate in the standard priority order.
+if [[ $# -eq 0 ]]; then set -- manager reviewer worker; fi
+requested_roles=("$@")
+for candidate in "${requested_roles[@]}"; do
+  case "$candidate" in
+    worker | reviewer | manager) ;;
+    *) usage ;;
+  esac
+done
+selected_roles=()
+for candidate in manager reviewer worker; do
+  if [[ " ${requested_roles[*]} " == *" $candidate "* ]]; then
+    selected_roles+=("$candidate")
+  fi
+done
+mode=auto
+if [[ ${#selected_roles[@]} -eq 1 ]]; then mode="${selected_roles[0]}"; fi
 role="$mode"
 
 if [[ -z "$CONFIG_PATH" ]]; then
@@ -152,6 +162,10 @@ fi
   exit 1
 }
 
+if [[ "${RALPH_RUNNER_MANAGED:-}" != 1 ]]; then
+  exec python3 "$SCRIPT_DIR/ralph" run --config "$CONFIG_PATH" "${selected_roles[@]}"
+fi
+
 RALPH_PROJECT_NAME="$(config_string '.projectName')"
 TASK_BACKEND="$(config_string '.taskBackend')"
 POLL_INTERVAL_SECONDS="$(jq -er '.pollIntervalSeconds // 300 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
@@ -180,7 +194,6 @@ cleanup() {
   if [[ -n "$rendered_prompt" ]]; then
     rm -f "$rendered_prompt"
   fi
-  if [[ -f "$PROJECT_ROOT/.ralph/runner.pid" && "$(<"$PROJECT_ROOT/.ralph/runner.pid")" == "$$" ]]; then rm -f "$PROJECT_ROOT/.ralph/runner.pid"; fi
   return "$exit_status"
 }
 trap cleanup EXIT
@@ -191,11 +204,15 @@ rendered_prompt="$(mktemp "${TMPDIR:-/tmp}/ralph-prompt.XXXXXX")"
 backend_requirements
 
 set_log_role() {
-  printf '%s' "$role" >"$RALPH_LOG_ROLE_FILE"
+  if [[ "$role" == auto ]]; then
+    printf '%s' scheduler >"$RALPH_LOG_ROLE_FILE"
+  else
+    printf '%s:%s' "$role" "$(state_command principal "$role")" >"$RALPH_LOG_ROLE_FILE"
+  fi
 }
 
 set_role_identity() {
-  if ! WACHA_AGENT_NAME="$(config_string ".roles.${1}.agentName")"; then
+  if ! WACHA_AGENT_NAME="$(state_command principal "$1")"; then
     ralph_log_error 'roles.%s.agentNameを設定してください: %s\n' "$1" "$CONFIG_PATH"
     exit 1
   fi
@@ -246,24 +263,64 @@ prepare_role() {
 
 GITHUB_ENABLED="$(jq -r '.github.enabled // false' "$CONFIG_PATH")"
 MAX_NO_PROGRESS="$(jq -er '.retry.maxNoProgressAttempts // 3 | numbers | select(. >= 1) | floor' "$CONFIG_PATH")"
-PAUSE_DIR="$PROJECT_ROOT/.ralph/pauses"
-mkdir -p "$PAUSE_DIR"
 GITHUB_HELPER="$RALPH_ROOT/lib/github_workflow.py"
-role_paused() { [[ -f "$PAUSE_DIR/$1.json" ]] && jq -e '.paused == true' "$PAUSE_DIR/$1.json" >/dev/null; }
+RUNTIME_HELPER="$RALPH_ROOT/lib/runtime_state.py"
+state_command() {
+  local action="$1" selected_role="$2"
+  shift 2
+  python3 "$RUNTIME_HELPER" "$action" --config "$CONFIG_PATH" --role "$selected_role" "$@"
+}
+execution_path() { state_command path "$1"; }
+task_summary() {
+  local selected_role="$1" raw
+  raw="$(backend_get_task_summary "$selected_role")" || return 1
+  if [[ "$GITHUB_ENABLED" == true ]]; then
+    printf '%s\n' "$raw" | python3 "$RALPH_ROOT/lib/execution_status.py" --config "$CONFIG_PATH" --role "$selected_role"
+  else
+    printf '%s\n' "$raw"
+  fi
+}
+set_activity() {
+  [[ "$role" != auto ]] || return 0
+  state_command activity "$role" --value "$(jq -cn --arg phase "$1" --arg taskId "${active_task_id:-}" --arg title "${active_task_title:-}" --arg pid "${2:-}" --arg reason "${3:-}" '{phase:$phase,taskId:$taskId,title:$title,pid:$pid,reason:$reason}')"
+}
+ralph_agent_started() {
+  set_activity agent_running "$1"
+  ralph_log 'Agent実行開始 provider=%s pid=%s Task=%s [%s]\n' "$AGENT_PROVIDER" "$1" "${active_task_title:-}" "${active_task_id:-}"
+}
+ralph_agent_finished() {
+  set_activity agent_finished
+  ralph_log 'Agent実行終了 exit=%s Task=%s [%s]\n' "$1" "${active_task_title:-}" "${active_task_id:-}"
+}
+role_paused() { [[ "$(state_command paused "$1")" == true ]]; }
 pause_role() {
-  jq -cn --arg reason "$2" '{paused: true, reason: $reason}' >"$PAUSE_DIR/$1.json.tmp"
-  mv "$PAUSE_DIR/$1.json.tmp" "$PAUSE_DIR/$1.json"
-  ralph_log_error '%sを停止しました: %s。原因を解消後、ralph resume %s で再開してください。\n' "$1" "$2" "$1"
+  state_command pause "$1" --value "$2"
+  ralph_log_error '%sを停止しました: %s。原因を解消後、ralph resume %s --principal %s で再開してください。\n' \
+    "$1" "$2" "$1" "$(state_command principal "$1")"
 }
 record_no_progress() {
-  local file="$PAUSE_DIR/$1.json" attempts=0
-  if [[ -f "$file" ]]; then attempts="$(jq -r '.attempts // 0' "$file")"; fi
-  attempts=$((attempts + 1))
-  jq -cn --argjson attempts "$attempts" '{attempts: $attempts, paused: false}' >"$file.tmp"
-  mv "$file.tmp" "$file"
+  local attempts
+  attempts="$(state_command no-progress "$1")"
   if (( attempts >= MAX_NO_PROGRESS )); then pause_role "$1" 'Task状態が連続して進みませんでした'; fi
 }
-github_command() { python3 "$GITHUB_HELPER" "$1" --config "$CONFIG_PATH" --role "$role"; }
+github_command() {
+  local path
+  path="$(execution_path "$role")"
+  rm -f "${path%.json}.error.json"
+  python3 "$GITHUB_HELPER" "$1" --config "$CONFIG_PATH" --role "$role"
+}
+github_failure_detail() {
+  local path
+  path="$(execution_path "$role")"
+  path="${path%.json}.error.json"
+  if [[ -f "$path" ]]; then
+    jq -r '"処理=" + .phase + " 原因=" + .reason +
+      (if .taskId then " Task=" + .taskId else "" end) +
+      (if .prNumber then " PR=#" + (.prNumber|tostring) else "" end)' "$path"
+  else
+    printf '処理=%s 終了コード=%s（直前のエラーログを確認してください）' "$1" "$2"
+  fi
+}
 provider_without_github_credentials() {
   local token_name token_value status index
   local -a token_names=() token_values=()
@@ -285,16 +342,10 @@ quota_key() {
   jq -r --arg role "$1" '(.roles[$role].agentProvider // .agentProvider) + ":" + (.roles[$role].quotaKey // "default")' "$CONFIG_PATH"
 }
 quota_retry_at() {
-  local path="$PROJECT_ROOT/.ralph/quota.json" key
-  key="$(quota_key "$1")"
-  if [[ -f "$path" ]]; then jq -r --arg key "$key" '.[$key] // 0' "$path"; else printf '0\n'; fi
+  state_command quota "$1" --key "$(quota_key "$1")"
 }
 set_quota_retry_at() {
-  local path="$PROJECT_ROOT/.ralph/quota.json" key contents='{}'
-  key="$(quota_key "$1")"
-  if [[ -f "$path" ]]; then contents="$(<"$path")"; fi
-  jq --arg key "$key" --argjson until "$2" '.[$key] = $until' <<<"$contents" >"$path.tmp"
-  mv "$path.tmp" "$path"
+  state_command set-quota "$1" --key "$(quota_key "$1")" --value "$2"
 }
 
 AUTO_MANAGER_RETRY_AT=0
@@ -323,17 +374,17 @@ select_auto_role() {
   local manager_summary='{"availableCount":0}' reviewer_summary='{"availableCount":0}' worker_summary='{"availableCount":0}'
   role=auto
   set_log_role
-  for candidate in manager reviewer worker; do
+  for candidate in "${selected_roles[@]}"; do
     if role_paused "$candidate"; then continue; fi
     set_role_identity "$candidate"
-    candidate_summary="$(backend_get_task_summary "$candidate")" || return 1
+    candidate_summary="$(task_summary "$candidate")" || return 1
     case "$candidate" in
       manager) manager_summary="$candidate_summary" ;;
       reviewer) reviewer_summary="$candidate_summary" ;;
       worker) worker_summary="$candidate_summary" ;;
     esac
     pending="$(backend_pending_count "$candidate" "$candidate_summary")"
-    if [[ "$GITHUB_ENABLED" == true && -f "$PROJECT_ROOT/.ralph/github-state/$candidate.json" ]]; then pending=1; fi
+    if [[ "$GITHUB_ENABLED" == true && -f "$(execution_path "$candidate")" ]]; then pending=1; fi
     retry_at="$(auto_role_retry_at "$candidate")"
     quota_at="$(quota_retry_at "$candidate")"
     if (( quota_at > retry_at )); then retry_at="$quota_at"; fi
@@ -351,7 +402,7 @@ select_auto_role() {
 }
 
 if [[ "$mode" == auto ]]; then
-  ralph_log 'Ralphを開始します。mode=auto log=%s\n' "$RALPH_LOG_FILE"
+  ralph_log 'Ralphを開始します。roles=%s log=%s\n' "${selected_roles[*]}" "$RALPH_LOG_FILE"
 else
   prepare_role "$mode"
   ralph_log 'Ralphを開始します。provider=%s role=%s command=%s model=%s log=%s\n' \
@@ -362,6 +413,7 @@ fi
 wait_before_retry() {
   local reason="$1"
   local delay="${2:-$RETRY_INITIAL_SECONDS}"
+  set_activity retry_wait "" "$reason"
   ralph_log_error '%s %d秒後に再試行します。\n' "$reason" "$delay"
   sleep "$delay"
 }
@@ -370,6 +422,17 @@ last_idle_log_epoch=0
 last_idle_summary=""
 
 while true; do
+  if ! state_command validate "${selected_roles[0]}"; then
+    ralph_log_error '運用状態の検証に失敗しました。%s/.ralph/runtime.json と直前のエラーを確認してください。\n' "$PROJECT_ROOT"
+    exit 78
+  fi
+  if [[ "$GITHUB_ENABLED" == true ]]; then
+    for cleanup_role in "${selected_roles[@]}"; do
+      if ! python3 "$GITHUB_HELPER" cleanup --config "$CONFIG_PATH" --role "$cleanup_role"; then
+        ralph_log_error '%sの完了済みWorktree掃除を実行できませんでした。直前のエラーを確認してください。\n' "$cleanup_role"
+      fi
+    done
+  fi
   if [[ "$mode" == auto ]]; then
     if ! select_auto_role; then
       wait_before_retry 'Wachaの状態取得に失敗しました。'
@@ -383,18 +446,18 @@ while true; do
   elif role_paused "$role" || (( $(date +%s) < $(quota_retry_at "$role") )); then
     sleep "$POLL_INTERVAL_SECONDS"
     continue
-  elif ! summary="$(backend_get_task_summary "$role")"; then
+  elif ! summary="$(task_summary "$role")"; then
     wait_before_retry 'Wachaの状態取得に失敗しました。'
     continue
   else
     pending="$(backend_pending_count "$role" "$summary")"
   fi
-  if [[ "$GITHUB_ENABLED" == true && "$role" != auto && -f "$PROJECT_ROOT/.ralph/github-state/$role.json" ]]; then pending=1; fi
+  if [[ "$GITHUB_ENABLED" == true && "$role" != auto && -f "$(execution_path "$role")" ]]; then pending=1; fi
   if (( pending == 0 )); then
     current_epoch="$(date +%s)"
     normalized_summary="$(jq -cS . <<<"$summary")"
     if [[ "$mode" == auto ]]; then
-      status='自動実行対象なし'
+      status="$(jq -r '[to_entries[] | "\(.key):実行可能=\(.value.availableCount // 0),保留=\(.value.deferredCount // 0)"] | join(" / ")' <<<"$summary")"
     else
       status="$(backend_format_status "$role" "$summary")"
     fi
@@ -408,6 +471,10 @@ while true; do
       ralph_log '待機中です。%s\n' "$status"
       last_idle_log_epoch="$current_epoch"
     fi
+    if [[ "$normalized_summary" != "$last_idle_summary" ]]; then
+      jq -r '[.. | objects | select(has("deferred")) | .deferred[]?] | unique_by(.taskId)[] | "保留Task=\(.title) [\(.taskId)] 理由=\(.reason) 記録=\(.recordPath)"' <<<"$summary" | while IFS= read -r deferred_line; do ralph_log '%s\n' "$deferred_line"; done
+    fi
+    set_activity waiting
     last_idle_summary="$normalized_summary"
     sleep "$POLL_INTERVAL_SECONDS"
     continue
@@ -423,16 +490,26 @@ while true; do
     prepare_role "$role" "$priority_status"
   fi
   backend_print_status "$role" "$summary"
-  ralph_log '%sを起動します。\n' "$role"
   execution_root="$PROJECT_ROOT"
+  recovery_run=false
+  recovery_timeout_seconds=0
   heartbeat_pid=""
   if [[ "$GITHUB_ENABLED" == true ]]; then
     if context="$(github_command prepare)"; then
-      if [[ "$(jq -r '.idle // false' <<<"$context")" == true ]]; then sleep "$POLL_INTERVAL_SECONDS"; continue; fi
+      if [[ "$(jq -r '.idle // false' <<<"$context")" == true ]]; then
+        ralph_log '選択処理後の実行対象なし。Agentは起動しません。\n'
+        if [[ "$mode" == auto ]]; then auto_set_role_retry_at "$role" "$(($(date +%s) + POLL_INTERVAL_SECONDS))"; else sleep "$POLL_INTERVAL_SECONDS"; fi
+        continue
+      fi
+      active_task_id="$(jq -r '.task.id // ""' <<<"$context")"
+      active_task_title="$(jq -r '.task.title // ""' <<<"$context")"
       execution_root="$(jq -r '.cwd' <<<"$context")"
+      recovery_run="$(jq -r '.recovery // false' <<<"$context")"
+      recovery_timeout_seconds="$(jq -r '.recoveryTimeoutSeconds // 0' <<<"$context")"
       if [[ "$(jq -r '.pending // false' <<<"$context")" != true ]]; then
         github_prompt="$(config_optional_string ".roles.${role}.githubPrompt")"
-        if [[ -z "$github_prompt" ]]; then github_prompt="$RALPH_ROOT/prompts/github-$role.md";
+        if [[ "$recovery_run" == true ]]; then github_prompt="$RALPH_ROOT/prompts/github-recovery.md";
+        elif [[ -z "$github_prompt" ]]; then github_prompt="$RALPH_ROOT/prompts/github-$role.md";
         elif [[ "$github_prompt" != /* ]]; then github_prompt="$PROJECT_ROOT/$github_prompt"; fi
         [[ -f "$github_prompt" ]] || { pause_role "$role" 'GitHub Promptが見つかりません'; continue; }
         cat "$github_prompt" >"$rendered_prompt"
@@ -440,23 +517,34 @@ while true; do
       fi
     else
       github_status=$?
-      if (( github_status == 78 )); then pause_role "$role" 'GitHub実行の準備に失敗しました'; fi
-      wait_before_retry 'GitHub実行を開始できませんでした。'
+      detail="$(github_failure_detail prepare "$github_status")"
+      if (( github_status == 76 || github_status == 79 )); then ralph_log '%s\n' "$detail"; continue; fi
+      if (( github_status == 78 )); then pause_role "$role" "$detail"; fi
+      wait_before_retry "$detail"
       continue
     fi
     if [[ "$(jq -r '.pending // false' <<<"$context")" == true ]]; then
+      ralph_log '保存済み結果を反映します。Task=%s [%s]\n' "$active_task_title" "$active_task_id"
+      set_activity applying
       if github_command finish; then
-        rm -f "$PAUSE_DIR/$role.json"
+        state_command progress "$role"
       else
         github_status=$?
-        if (( github_status == 78 )); then pause_role "$role" 'GitHub実行結果の反映に失敗しました'; fi
-        wait_before_retry 'GitHubの実行結果を再確認します。'
+        if (( github_status == 79 )); then ralph_log 'Taskを保留しました。他のTaskを確認します。\n'; continue; fi
+        if (( github_status == 76 )); then
+          ralph_log '%sへ再判定・修正を返します。同じWorktreeと保存済みの検証記録を引き継ぎます。\n' "$role"
+          continue
+        fi
+        detail="$(github_failure_detail finish "$github_status")"
+        if (( github_status == 78 )); then pause_role "$role" "$detail"; fi
+        wait_before_retry "$detail"
       fi
       continue
     fi
     python3 "$GITHUB_HELPER" watch --config "$CONFIG_PATH" --role "$role" &
     heartbeat_pid=$!
   fi
+  export RALPH_RECOVERY_TIMEOUT_SECONDS="${recovery_timeout_seconds:-0}"
   if provider_without_github_credentials; then
     provider_status=0
   else
@@ -482,6 +570,13 @@ while true; do
       else
         wait_before_retry "$retry_reason" "$retry_delay"
       fi
+    elif (( recovery_timeout_seconds > 0 )); then
+      if github_command agent-failed; then :; else
+        recovery_status=$?
+        if (( recovery_status != 76 && recovery_status != 79 )); then
+          pause_role "$role" "$(github_failure_detail recover "$recovery_status")"
+        fi
+      fi
     else
       record_no_progress "$role"
       wait_before_retry "${role}が終了コード ${provider_status} で終了しました。"
@@ -490,16 +585,27 @@ while true; do
   fi
 
   if [[ "$GITHUB_ENABLED" == true ]]; then
-    if github_command finish; then
-      rm -f "$PAUSE_DIR/$role.json"
+    github_final_command=finish
+    if [[ "$recovery_run" == true ]]; then github_final_command=recover; fi
+    set_activity applying
+    ralph_log '結果反映開始 operation=%s Task=%s [%s]\n' "$github_final_command" "$active_task_title" "$active_task_id"
+    if github_command "$github_final_command"; then
+      state_command progress "$role"
     else
       github_status=$?
-      if (( github_status == 78 )); then pause_role "$role" 'GitHub実行結果の反映に失敗しました'; fi
-      wait_before_retry 'GitHub実行結果を反映できませんでした。'
+      if (( github_status == 79 )); then ralph_log 'Taskを保留しました。他のTaskを確認します。\n'; continue; fi
+      if (( github_status == 76 )); then
+        ralph_log '%sへ再判定・修正を返します。同じWorktreeと保存済みの検証記録を引き継ぎます。\n' "$role"
+        continue
+      fi
+      detail="$(github_failure_detail finish "$github_status")"
+      if (( github_status == 76 || github_status == 79 )); then ralph_log '%s\n' "$detail"; continue; fi
+      if (( github_status == 78 )); then pause_role "$role" "$detail"; fi
+      wait_before_retry "$detail"
     fi
     continue
   fi
-  if ! updated_summary="$(backend_get_task_summary "$role")"; then
+  if ! updated_summary="$(task_summary "$role")"; then
     wait_before_retry 'Agent実行後のWacha状態取得に失敗しました。'
     continue
   fi
@@ -508,6 +614,6 @@ while true; do
     wait_before_retry "${role}実行後もTask状態が変化しませんでした。"
     continue
   else
-    rm -f "$PAUSE_DIR/$role.json"
+    state_command progress "$role"
   fi
 done

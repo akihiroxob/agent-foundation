@@ -92,11 +92,11 @@ class McpConfigTest(unittest.TestCase):
                                      "wacha": {"url": "http://actual/mcp"},
                                      "verification": {"hostCommands": [["npm", "test"]]}}))
         original = self.path.read_bytes()
-        servers = Workflow(config, "worker").agent_mcp_config("active-claim")["mcpServers"]
+        servers = Workflow(config, "worker", "alternate-worker").agent_mcp_config("active-claim")["mcpServers"]
         self.assertEqual(servers["custom-tool"], self.servers["custom-tool"])
         self.assertEqual(servers["remote"], self.servers["remote"])
         self.assertEqual(servers["wacha"]["url"], "http://actual/mcp")
-        self.assertEqual(servers["ralph_verification"]["args"][-2:], ["--claim-id", "active-claim"])
+        self.assertEqual(servers["ralph_verification"]["args"][-2:], ["--principal", "alternate-worker"])
         self.assertEqual(self.path.read_bytes(), original)
         self.path.write_text("invalid json")
         with self.assertRaisesRegex(WorkflowError, "Cannot read MCP configuration"):

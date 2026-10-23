@@ -66,7 +66,8 @@ backend_get_task_summary() {
     --arg availability "$availability" \
     '{projectId: $project_id, filter: {availableFor: $availability}}')")"
   # Wachaのacceptance候補にはin_reviewも含まれる。Managerはwait_acceptだけを対象にする。
-  jq -e --arg role "$role" '{
+  jq -e --arg role "$role" --arg projectId "$project_id" '{
+    projectId: $projectId,
     byStatus: .result.structuredContent.summary.byStatus,
     availableCount: ((.result.structuredContent.tasks // []) | map(select($role != "manager" or .status == "wait_accept")) | length),
     availableRejected: ((.result.structuredContent.tasks // []) | map(select(.status == "rejected")) | length),
@@ -78,11 +79,11 @@ backend_format_status() {
   local role="$1"
   local summary="$2"
   if [[ "$role" == worker ]]; then
-    jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0)"' <<<"$summary"
+    jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0) 保留=\(.deferredCount // 0)"' <<<"$summary"
   elif [[ "$role" == reviewer ]]; then
-    jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0)"' <<<"$summary"
+    jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0) 保留=\(.deferredCount // 0)"' <<<"$summary"
   else
-    jq -r '"Manager対象: wait_accept=\(.byStatus.wait_accept // 0) available=\(.availableCount // 0)"' <<<"$summary"
+    jq -r '"Manager対象: wait_accept=\(.byStatus.wait_accept // 0) available=\(.availableCount // 0) 保留=\(.deferredCount // 0)"' <<<"$summary"
   fi
 }
 

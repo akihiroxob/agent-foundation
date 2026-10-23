@@ -67,15 +67,21 @@ provider_run() {
 
   (
     cd "$project_root"
-    exec "$CODEX_BIN" "${args[@]}" <"$prompt_path" 2>"$error_pipe"
+    local -a timeout_command=()
+    if (( ${RALPH_RECOVERY_TIMEOUT_SECONDS:-0} > 0 )); then
+      timeout_command=(python3 "$(dirname "$PROVIDER_RESET_PARSER")/agent_timeout.py" "$RALPH_RECOVERY_TIMEOUT_SECONDS")
+    fi
+    exec ${timeout_command[@]+"${timeout_command[@]}"} "$CODEX_BIN" "${args[@]}" <"$prompt_path" 2>"$error_pipe"
   ) &
   PROVIDER_PID=$!
+  if declare -F ralph_agent_started >/dev/null; then ralph_agent_started "$PROVIDER_PID"; fi
   if wait "$PROVIDER_PID"; then
     provider_status=0
   else
     provider_status=$?
   fi
   PROVIDER_PID=""
+  if declare -F ralph_agent_finished >/dev/null; then ralph_agent_finished "$provider_status"; fi
   wait "$tee_pid" 2>/dev/null || true
   rm -f "$error_pipe"
   if (( provider_status == 0 )); then

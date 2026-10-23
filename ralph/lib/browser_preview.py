@@ -26,8 +26,8 @@ def browser_config(config: dict) -> dict | None:
     value = section.get("browser")
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) - {"command", "env", "readyPath"}:
-        raise WorkflowError("verification.browser must contain command, optional env and readyPath")
+    if not isinstance(value, dict) or set(value) - {"command", "env", "readyPath", "setupCommands"}:
+        raise WorkflowError("verification.browser must contain command, optional env, readyPath and setupCommands")
     command = value.get("command")
     if not isinstance(command, list) or not command or any(not isinstance(s, str) or not s or "\0" in s for s in command):
         raise WorkflowError("verification.browser.command must be a non-empty argument array")
@@ -39,7 +39,11 @@ def browser_config(config: dict) -> dict | None:
     path = value.get("readyPath", "/")
     if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or "\0" in path:
         raise WorkflowError("verification.browser.readyPath must be a local absolute URL path")
-    return {"command": command, "env": env, "readyPath": path}
+    setup = value.get("setupCommands", [])
+    if not isinstance(setup, list) or any(not isinstance(item, list) or not item or
+            any(not isinstance(arg, str) or not arg or "\0" in arg for arg in item) for item in setup):
+        raise WorkflowError("verification.browser.setupCommands must be an array of argument arrays")
+    return {"command": command, "env": env, "readyPath": path, "setupCommands": setup}
 
 
 def playwright_config(root: Path) -> dict:
@@ -130,7 +134,36 @@ class PreviewSession:
             env = {k: v for k, v in os.environ.items() if k in SAFE_ENV}
             env.update({k: expand(v) for k, v in settings["env"].items()})
             try:
-                self.process = subprocess.Popen(command, cwd=cwd, env=env, stdout=self.log,
+                self.record["preparation"] = []
+                for index, setup in enumerate(settings["setupCommands"]):
+                    self.owner.active_workflow()
+                    setup_log = directory / f"setup-{index + 1}.log"
+                    entry = {"command": [expand(arg) for arg in setup], "logPath": str(setup_log), "exitCode": None}
+                    self.record["preparation"].append(entry)
+                    atomic_json(self.record_path, self.record)
+                    with setup_log.open("w") as output:
+                        self.process = subprocess.Popen(entry["command"], cwd=cwd, env=env,
+                            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                        deadline = time.monotonic() + self.START_TIMEOUT
+                        while True:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise WorkflowError("Preview preparation timed out; inspect setup log")
+                            try:
+                                entry["exitCode"] = self.process.wait(timeout=min(30, remaining))
+                                break
+                            except subprocess.TimeoutExpired:
+                                self.owner.active_workflow()
+                    atomic_json(self.record_path, self.record)
+                    if entry["exitCode"] != 0:
+                        raise WorkflowError("Preview preparation failed; inspect setup log")
+                    terminate(self.process)
+                    self.process = None
+                self.owner.active_workflow()
+                if fingerprint(cwd) != self.record["sourceFingerprint"] or run("git", "rev-parse", "HEAD", cwd=cwd) != self.record["headSha"]:
+                    raise WorkflowError("Preview preparation changed source or HEAD")
+                # Child runtimes must not alter the MCP input pipe or consume its requests.
+                self.process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=self.log,
                     stderr=subprocess.STDOUT, start_new_session=True)
                 self.record["pid"] = self.process.pid
                 atomic_json(self.record_path, self.record)

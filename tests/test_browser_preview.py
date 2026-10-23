@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,7 +30,7 @@ class BrowserPreviewTest(unittest.TestCase):
         (self.root / "app.txt").write_text("initial")
         run("git", "add", ".", cwd=self.root)
         run("git", "commit", "-m", "Initial", cwd=self.root)
-        self.cwd = self.root / ".ralph/worktrees/manager-task-claim123"
+        self.cwd = self.root / ".ralph/worktrees/manager/manager"
         run("git", "worktree", "add", "--detach", str(self.cwd), "HEAD", cwd=self.root)
         self.config = self.root / ".ralph/config.json"
         self.command = [sys.executable, "-u", "-c", "import http.server,os; print(os.getcwd()); print(os.environ.get('CUSTOM_SECRET_TOKEN','absent')); print(os.environ['FIXTURE_PATH']); http.server.HTTPServer(('127.0.0.1',int(os.environ['PORT'])),http.server.SimpleHTTPRequestHandler).serve_forever()"]
@@ -37,7 +39,7 @@ class BrowserPreviewTest(unittest.TestCase):
             "env": {"PORT": "{port}", "FIXTURE_PATH": "{dataDir}/fixture.db"}}}}
         atomic_json(self.config, self.settings)
         self.state = {"claimId": "claim123", "task": {"id": "task"}, "cwd": str(self.cwd)}
-        self.state_path = self.root / ".ralph/github-state/manager.json"
+        self.state_path = self.root / ".ralph/github-state/manager/manager.json"
         atomic_json(self.state_path, self.state)
         self.playwright = {"type": "stdio", "command": "npx", "args": ["-y", "@playwright/mcp@0.0.83", "--isolated", "--headless"], "env": {"EXAMPLE": 'value with "quotes"'}}
         atomic_json(self.root / ".mcp.json", {"mcpServers": {"playwright": self.playwright, "unrelated": {"command": "never"}}})
@@ -175,6 +177,88 @@ class BrowserPreviewTest(unittest.TestCase):
                 process.wait(timeout=5)
             process.stdout.close()
             process.stderr.close()
+
+    def test_children_cannot_change_mcp_stdin_or_disconnect_preview(self):
+        self.require_loopback()
+        # Model Node's stdin handling without requiring Node in the test environment.
+        change_stdin = "import fcntl,os; fcntl.fcntl(0,fcntl.F_SETFL,fcntl.fcntl(0,fcntl.F_GETFL)|os.O_NONBLOCK); "
+        self.settings["verification"]["browser"]["command"] = [sys.executable, "-u", "-c",
+            change_stdin + "import http.server; http.server.HTTPServer(('127.0.0.1',int(os.environ['PORT'])),http.server.SimpleHTTPRequestHandler).serve_forever()"]
+        command = [sys.executable, "-c", change_stdin + "print('host verification complete')"]
+        self.settings["verification"]["hostCommands"] = [command]
+        atomic_json(self.config, self.settings)
+        root = Path(__file__).resolve().parents[1]
+        code = 'from ralph.lib.github_workflow import Workflow; Workflow.renew=lambda self: None; from ralph.lib.host_verification import main; main()'
+        with (self.root / "mcp-stderr.log").open("w") as error_log:
+            process = subprocess.Popen([sys.executable, "-u", "-c", code, "--config", str(self.config),
+                "--role", "manager", "--claim-id", "claim123"], cwd=root, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=error_log, text=True)
+            def request(identifier, method, params=None):
+                process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method,
+                    "params": params or {}}) + "\n")
+                process.stdin.flush()
+                self.assertTrue(select.select([process.stdout], [], [], 10)[0], "MCP response timed out")
+                line = process.stdout.readline()
+                self.assertTrue(line, "MCP disconnected while its client kept stdin open")
+                return json.loads(line)["result"]
+            try:
+                request(1, "initialize", {"protocolVersion": "2025-03-26"})
+                request(2, "tools/list")
+                preview = request(3, "tools/call", {"name": "start_browser_preview", "arguments": {}})
+                self.assertFalse(preview["isError"])
+                url = preview["structuredContent"]["url"]
+                self.assertEqual(request(4, "ping"), {})
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+                host = request(5, "tools/call", {"name": "run_host_verification", "arguments": {"command": command}})
+                self.assertFalse(host["isError"])
+                self.assertEqual(host["structuredContent"]["exitCode"], 0)
+                self.assertEqual(request(6, "ping"), {})
+                self.assertIsNone(process.poll())
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+                request(7, "tools/call", {"name": "stop_browser_preview", "arguments": {}})
+            finally:
+                process.stdin.close()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.wait(timeout=5)
+                process.stdout.close()
+
+    def test_preview_preparation_creates_isolated_fixture_and_records_evidence(self):
+        self.require_loopback()
+        command = [sys.executable, "-c", "from pathlib import Path; import os; p=Path(os.environ['FIXTURE_PATH']); p.write_text('fixture'); print('scenario=display, id=example, role=viewer')"]
+        self.settings["verification"]["browser"]["setupCommands"] = [command]
+        atomic_json(self.config, self.settings)
+        record = self.server.preview.start({})
+        self.assertEqual(record["status"], "ready")
+        self.assertEqual((Path(record["dataDirectory"]) / "fixture.db").read_text(), "fixture")
+        self.assertEqual(record["preparation"][0]["exitCode"], 0)
+        self.assertIn("role=viewer", Path(record["preparation"][0]["logPath"]).read_text())
+        self.assertEqual(self.server.preview.stop()["sourceUnchanged"], True)
+
+    def test_preparation_failure_timeout_and_source_changes_prevent_preview(self):
+        self.require_loopback()
+        from ralph.lib.browser_preview import PreviewSession
+        for code, message, timeout in [("raise SystemExit(3)", "preparation failed", 120),
+                ("import time; time.sleep(5)", "preparation timed out", 0.05),
+                ("from pathlib import Path; Path('app.txt').write_text('changed')", "changed source", 120)]:
+            self.settings["verification"]["browser"]["setupCommands"] = [[sys.executable, "-c", code]]
+            atomic_json(self.config, self.settings)
+            with patch.object(PreviewSession, "START_TIMEOUT", timeout):
+                with self.assertRaisesRegex(WorkflowError, message):
+                    self.server.preview.start({})
+            self.assertIsNone(self.server.preview.process)
+            self.assertEqual(self.server.preview.record["status"], "startup_failed")
+            self.assertNotIn("Compass running", Path(self.server.preview.record["logPath"]).read_text())
+            (self.cwd / "app.txt").write_text("initial")
+
+    def test_preparation_configuration_rejects_shell_strings_and_invalid_arguments(self):
+        for commands in ("npm run seed", ["npm"], [[]], [[""]], [[1]]):
+            with self.assertRaisesRegex(WorkflowError, "setupCommands"):
+                browser_config({"verification": {"browser": {"command": ["npm", "start"], "setupCommands": commands}}})
 
     def test_both_providers_receive_playwright_definition(self):
         root = Path(__file__).resolve().parents[1]

@@ -51,8 +51,9 @@ def fingerprint(cwd: Path) -> str:
 
 
 class VerificationServer:
-    def __init__(self, config: Path, role: str, claim_id: str):
+    def __init__(self, config: Path, role: str, claim_id: str, principal: str | None = None):
         self.config, self.role, self.claim_id = config, role, claim_id
+        self.principal = principal
         self.last_record: Path | None = None
         if __package__:
             from .browser_preview import PreviewSession
@@ -61,12 +62,12 @@ class VerificationServer:
         self.preview = PreviewSession(self)
 
     def active_workflow(self) -> Workflow:
-        workflow = Workflow(self.config, self.role)
+        workflow = Workflow(self.config, self.role, self.principal)
         state = workflow.state
         if not state or state.get("claimId") != self.claim_id or state.get("completed"):
             raise WorkflowError("Verification is not attached to the active execution")
         cwd = Path(state["cwd"])
-        expected = workflow.root / ".ralph/worktrees" / f"{self.role}-{state['task']['id']}-{state.get('worktreeClaimId', self.claim_id)[:8]}"
+        expected = workflow.expected_worktree(state)
         if cwd != expected or cwd.resolve() != expected.absolute():
             raise WorkflowError("Verification cwd must be the registered Task worktree")
         registered = run("git", "worktree", "list", "--porcelain", "-z", cwd=workflow.root).split("\0")
@@ -79,7 +80,7 @@ class VerificationServer:
         self.last_record = None
         if not isinstance(arguments, dict):
             raise WorkflowError("Verification arguments must be an object")
-        workflow = Workflow(self.config, self.role)  # Always reload the host-owned configuration.
+        workflow = Workflow(self.config, self.role, self.principal)  # Always reload the host-owned configuration.
         command = arguments.get("command")
         if set(arguments) != {"command"} or command not in commands(workflow.config):
             raise WorkflowError("Command and arguments must exactly match verification.hostCommands")
@@ -99,8 +100,9 @@ class VerificationServer:
         process = None
         try:
             with log_path.open("w", encoding="utf-8") as log:
+                # Child runtimes must not alter the MCP input pipe or consume its requests.
                 process = subprocess.Popen(command, cwd=cwd, env={k: v for k, v in os.environ.items() if k in SAFE_ENV},
-                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 deadline = time.monotonic() + TIMEOUT_SECONDS
                 while True:
                     remaining = deadline - time.monotonic()
@@ -147,7 +149,7 @@ class VerificationServer:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            allowed = commands(Workflow(self.config, self.role).config)
+            allowed = commands(Workflow(self.config, self.role, self.principal).config)
             result = {"tools": [{"name": "run_host_verification", "description":
                 "Run one Project-approved verification command on the host in the active Task worktree. "
                 "Read its log and verify headSha/sourceFingerprint before using it as evidence. "
@@ -160,7 +162,7 @@ class VerificationServer:
                 from .browser_preview import browser_config
             else:
                 from browser_preview import browser_config
-            if self.role == "manager" and browser_config(Workflow(self.config, self.role).config):
+            if self.role == "manager" and browser_config(Workflow(self.config, self.role, self.principal).config):
                 for name, description in (("start_browser_preview", "Start the Project-approved preview server on the host for this Manager worktree. Returns URL, SHA and artifact directory. No command overrides."), ("stop_browser_preview", "Stop this preview and record whether its source/HEAD changed. Does not accept a PID.")):
                     result["tools"].append({"name": name, "description": description, "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
         elif method == "tools/call":
@@ -195,8 +197,9 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--role", choices=["worker", "reviewer", "manager"], required=True)
     parser.add_argument("--claim-id", required=True)
+    parser.add_argument("--principal")
     args = parser.parse_args()
-    server = VerificationServer(args.config, args.role, args.claim_id)
+    server = VerificationServer(args.config, args.role, args.claim_id, args.principal)
     def interrupt(signum, frame):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, interrupt)

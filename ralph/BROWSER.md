@@ -14,6 +14,7 @@ Projectの `.ralph/config.json` にホストで起動する検証用Serverを設
     "hostCommands": [],
     "browser": {
       "command": ["npm", "start"],
+      "setupCommands": [["npm", "run", "prepare:acceptance", "--", "--data-dir", "{dataDir}"]],
       "env": {
         "PORT": "{port}",
         "APP_DB_PATH": "{dataDir}/preview.db"
@@ -34,4 +35,22 @@ Contextの `browserVerificationEnabled` がtrueなら、`browserVerificationSkil
 
 証跡は `.ralph/verification/<claimId>/browser/` に保持する。Playwrightのoutput directoryも同じ場所に設定し、worktreeの掃除後も残す。`session-*/preview.json` に対象SHA・source fingerprint・Serverログpath・開始/終了時刻・停止理由を記録する。環境変数は最小限のOS設定と明示した検証用envだけであり、RalphのGitHub tokenやWacha Credentialを継承しない。
 
-終了時は `playwright.browser_close` と `ralph_verification.stop_browser_preview` を呼び、`sourceUnchanged` を確認する。MCPのstdin切断・SIGTERM・SIGINTでもServerを停止する。Claim無効化・Server終了を60秒ごとに確認し、Serverの保持上限は1時間。通常の切断処理が動かない強制終了・端末停止後は、記録とプロセスを照合して残存Serverを復旧手順で確認する。Agent側の `--dangerously-bypass-approvals-and-sandbox` は不要。
+終了時は `playwright.browser_close` と `ralph_verification.stop_browser_preview` を呼び、`sourceUnchanged` を確認する。子プロセスのstdinは閉じ、MCPの通信入力を継承させない。MCPのstdin切断・SIGTERM・SIGINTでもServerを停止する。Claim無効化・Server終了を60秒ごとに確認し、Serverの保持上限は1時間。通常の切断処理が動かない強制終了・端末停止後は、記録とプロセスを照合して残存Serverを復旧手順で確認する。Agent側の `--dangerously-bypass-approvals-and-sandbox` は不要。
+
+## 検証データの準備
+
+`verification.browser.setupCommands` はProjectが許可した起動前の準備コマンド一覧。省略時は実行しない。各コマンドを対象worktreeで順に実行し、プレビューと同じ明示env・`{dataDir}`・`{port}`を使う。Agentからコマンド・引数・cwd・データ保存先を上書きできない。
+
+準備スクリプトはProjectで管理し、専用ディレクトリにDB等を作る。具体的なApplication・schema・シナリオをRalphへ埋め込まない。作成したID・Role・シナリオを標準出力へ返し、認証情報は出力しない。Project設定が許可の正本で、各実行時の人への確認は不要。コマンド自体が一時環境だけを扱うよう実装する。Ralphは任意のスクリプトのアクセス先を自動判定するものではない。
+
+各コマンドの上限は120秒。失敗・timeout・Claim無効化・ソース/HEAD変更ではServerを起動しない。Claimを確認し、子プロセスのstdinを分離して終了を待つ。戻り値と `preview.json` の `preparation` にコマンド・終了コード・`setup-N.log` の参照を残す。準備の成功はAC成功を意味しない。
+
+例の `prepare:acceptance` はProjectで用意するscript名で、Ralphに同梱されたコマンドではない。
+
+## Principal別の並行検証
+
+検証MCPにはRalphが選択したPrincipalとClaimを渡す。Roleだけから別Principalの実行を参照しない。毎回、Principal別の実行記録・Claim・登録済みWorktreeを照合する。Worktreeは`.ralph/worktrees/<principal>/<role>`を使う。Playwrightはisolated context、portは実行ごと、データと証跡はClaim/sessionごとに分離する。Projectの検証・setupコマンド自体が共有DB・固定port・共有node_modulesへ書き込まないことも確認する。
+
+## 検証データの不足への対応
+
+初期データだけでACの状態が揃わない場合は、Managerが利用先RepositoryのPolicyに従い、専用プレビューの公開API等で検証データを追加する。実行Contextの業務Task/Claimへの操作禁止と、専用環境の検証用Entity操作を区別する。許可する主体・操作・接続先はProjectが定め、共通Skillへ製品固有のAPIやDB構造を記載しない。未許可のホスト実行や運用データの変更を許可するものではない。
