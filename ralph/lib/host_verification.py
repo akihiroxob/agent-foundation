@@ -51,29 +51,42 @@ def fingerprint(cwd: Path) -> str:
 
 
 class VerificationServer:
-    def __init__(self, config: Path, role: str, claim_id: str):
+    def __init__(self, config: Path, role: str, claim_id: str, principal: str | None = None):
         self.config, self.role, self.claim_id = config, role, claim_id
+        self.principal = principal
         self.last_record: Path | None = None
+        if __package__:
+            from .browser_preview import PreviewSession
+        else:
+            from browser_preview import PreviewSession
+        self.preview = PreviewSession(self)
 
-    def execute(self, arguments: dict) -> dict:
-        self.last_record = None
-        if not isinstance(arguments, dict):
-            raise WorkflowError("Verification arguments must be an object")
-        workflow = Workflow(self.config, self.role)  # Always reload the host-owned configuration.
-        command = arguments.get("command")
-        if set(arguments) != {"command"} or command not in commands(workflow.config):
-            raise WorkflowError("Command and arguments must exactly match verification.hostCommands")
+    def active_workflow(self) -> Workflow:
+        workflow = Workflow(self.config, self.role, self.principal)
         state = workflow.state
         if not state or state.get("claimId") != self.claim_id or state.get("completed"):
             raise WorkflowError("Verification is not attached to the active execution")
         cwd = Path(state["cwd"])
-        expected = workflow.root / ".ralph/worktrees" / f"{self.role}-{state['task']['id']}-{state.get('worktreeClaimId', self.claim_id)[:8]}"
+        expected = workflow.expected_worktree(state)
         if cwd != expected or cwd.resolve() != expected.absolute():
             raise WorkflowError("Verification cwd must be the registered Task worktree")
         registered = run("git", "worktree", "list", "--porcelain", "-z", cwd=workflow.root).split("\0")
         if f"worktree {cwd}" not in registered:
             raise WorkflowError("Verification cwd is not a registered worktree")
-        workflow.renew()  # Never reacquire a different Claim while an Agent is running.
+        workflow.renew()
+        return workflow
+
+    def execute(self, arguments: dict) -> dict:
+        self.last_record = None
+        if not isinstance(arguments, dict):
+            raise WorkflowError("Verification arguments must be an object")
+        workflow = Workflow(self.config, self.role, self.principal)  # Always reload the host-owned configuration.
+        command = arguments.get("command")
+        if set(arguments) != {"command"} or command not in commands(workflow.config):
+            raise WorkflowError("Command and arguments must exactly match verification.hostCommands")
+        workflow = self.active_workflow()
+        state = workflow.state
+        cwd = Path(state["cwd"])
         directory = workflow.root / ".ralph/verification" / self.claim_id
         directory.mkdir(parents=True, exist_ok=True)
         record_path = directory / f"{uuid.uuid4().hex}.json"
@@ -87,8 +100,9 @@ class VerificationServer:
         process = None
         try:
             with log_path.open("w", encoding="utf-8") as log:
+                # Child runtimes must not alter the MCP input pipe or consume its requests.
                 process = subprocess.Popen(command, cwd=cwd, env={k: v for k, v in os.environ.items() if k in SAFE_ENV},
-                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 deadline = time.monotonic() + TIMEOUT_SECONDS
                 while True:
                     remaining = deadline - time.monotonic()
@@ -135,23 +149,39 @@ class VerificationServer:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            allowed = commands(Workflow(self.config, self.role).config)
-            if not allowed:
-                return {"jsonrpc": "2.0", "id": request["id"], "result": {"tools": []}}
+            allowed = commands(Workflow(self.config, self.role, self.principal).config)
             result = {"tools": [{"name": "run_host_verification", "description":
                 "Run one Project-approved verification command on the host in the active Task worktree. "
                 "Read its log and verify headSha/sourceFingerprint before using it as evidence. "
                 "Commands are matched exactly; this executes outside the Agent sandbox.",
                 "inputSchema": {"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}, "enum": allowed}},
                     "required": ["command"], "additionalProperties": False}}]}
+            if not allowed:
+                result["tools"] = []
+            if __package__:
+                from .browser_preview import browser_config
+            else:
+                from browser_preview import browser_config
+            if self.role == "manager" and browser_config(Workflow(self.config, self.role, self.principal).config):
+                for name, description in (("start_browser_preview", "Start the Project-approved preview server on the host for this Manager worktree. Returns URL, SHA and artifact directory. No command overrides."), ("stop_browser_preview", "Stop this preview and record whether its source/HEAD changed. Does not accept a PID.")):
+                    result["tools"].append({"name": name, "description": description, "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
         elif method == "tools/call":
             params = request.get("params", {})
             try:
-                if params.get("name") != "run_host_verification":
+                name = params.get("name")
+                arguments = params.get("arguments", {})
+                if name == "run_host_verification":
+                    result = self.execute(arguments)
+                elif name == "start_browser_preview":
+                    result = self.preview.start(arguments)
+                elif name == "stop_browser_preview" and self.role == "manager":
+                    if arguments != {}:
+                        raise WorkflowError("stop_browser_preview takes no arguments")
+                    result = self.preview.stop()
+                else:
                     raise WorkflowError("Unknown verification tool")
-                result = self.execute(params.get("arguments", {}))
                 result = {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}],
-                    "structuredContent": result, "isError": result["status"] != "passed"}
+                    "structuredContent": result, "isError": result["status"] not in {"passed", "ready", "stopped", "not_started"}}
             except (WorkflowError, ValueError, KeyError, OSError, subprocess.TimeoutExpired) as error:
                 message = str(error) if isinstance(error, WorkflowError) else "Host verification interrupted; inspect verification records."
                 result = {"content": [{"type": "text", "text": message}], "isError": True}
@@ -167,15 +197,20 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--role", choices=["worker", "reviewer", "manager"], required=True)
     parser.add_argument("--claim-id", required=True)
+    parser.add_argument("--principal")
     args = parser.parse_args()
-    server = VerificationServer(args.config, args.role, args.claim_id)
+    server = VerificationServer(args.config, args.role, args.claim_id, args.principal)
     def interrupt(signum, frame):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, interrupt)
-    for line in sys.stdin:
-        response = server.handle(json.loads(line))
-        if response is not None:
-            print(json.dumps(response, ensure_ascii=False), flush=True)
+    signal.signal(signal.SIGINT, interrupt)
+    try:
+        for line in sys.stdin:
+            response = server.handle(json.loads(line))
+            if response is not None:
+                print(json.dumps(response, ensure_ascii=False), flush=True)
+    finally:
+        server.preview.stop("client_disconnected")
 
 
 if __name__ == "__main__":

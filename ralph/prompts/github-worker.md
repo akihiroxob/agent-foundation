@@ -24,3 +24,9 @@ Reviewer差し戻しは同じPRの修正、Manager差し戻しは新規PRにな�
 ## ホスト側の検証
 
 Contextの`hostVerificationCommands`に必要な検証が登録されていれば、`ralph_verification` MCPの`run_host_verification`を使う。`command`には登録済み配列をそのまま指定し、追加引数やcwdを指定しない。終了コードとログを読み、成功・失敗・skipを区別してsummaryに記録pathを含める。対象HEADと変更内容が検証時から変わっていないことを確認し、実装を変更したら必要な検証を再実行する。sandbox内のEPERMでskipされた検証も、ホスト側で実施できた範囲はその証拠を使う。未登録のコマンドをホストで実行しない。サーバーの起動・検証・停止まで完結するコマンドを使う。
+
+## commit前チェックからの修正依頼
+
+Contextに `workerRepair` があれば、実装済み成果物の修正依頼である。`previousResultPath`・`previousExecutionPath` と現在の差分・Taskの最新ACを読み、`reason`・`diagnostics` のファイル・行・問題を確認する。同じWorktreeの変更・indexを保持し、実装を最初から作り直さない。
+
+指摘と関連する不整合を修正し、影響に応じた検証を行う。manifestの不整合は実際の追加・変更・削除・リネームと照合する。新しい結果JSONには成果物の全体を列挙し、前回の有効な検証と今回の再検証を区別して記録する。Gitのcommit/pushやPR操作、Claimの取得し直しは行わない。認証・権限等で修正できない場合は具体的な理由を返す。

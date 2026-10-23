@@ -10,7 +10,7 @@ RalphがAcceptance Claimとマージcommitの専用worktreeを用意済みです
 
 `summary`はMarkdown文字列にし、`### ACとの対応`・`### 検証結果`・`### 不足・修正条件`・`### 未検証`の見出しと短い箇条書きで整理する。見出しとリストの前後には空行を入れ、コマンド・path・識別子はバッククォートで囲む。報告全体をコードブロックで囲まない。JSONの改行は`\n`としてエンコードし、読み込んだ文字列が実際の改行になるようにする。
 
-Gitの変更、GitHub操作、Claimの取得、Wachaのaccept/reject/releaseはRalphが担うため実行しない。
+実行ContextのTask/Claimの取得・変更・解放、Gitの変更、GitHub操作、実運用のaccept/rejectはRalphが担うため実行しない。RepositoryのPolicyが明示的に許可する専用プレビュー内の検証データ操作は、この実行管理操作と区別する。検証用Task・Claim等が不足した場合は、許可された主体・API・範囲で準備してから確認する。実運用のMCPと専用プレビューのAPIを混同しない。
 差し戻されたTaskは最新の統合branchを基点に、新しいPRで修正される。重大な回帰はrevertの要否を報告に記載する。
 環境問題は`decision: blocked`と具体的な`summary`を出力する。
 
@@ -22,5 +22,7 @@ Gitの変更、GitHub操作、Claimの取得、Wachaのaccept/reject/releaseはR
 - Contextに`executionError`がある場合は、前回の停止理由と既存の検証状況を確認して引き継ぐ。
 
 ## ホスト側の検証
+
+UIに関するACは実ブラウザで独立に検証する。Contextの`browserVerificationEnabled`がtrueなら、`browserVerificationSkill`の`verify-browser-ac`を読み、`ralph_verification`の`start_browser_preview`とPlaywright MCPを使用する。返された専用URLへアクセスし、操作結果とスクリーンショットを確認する。終了時は`browser_close`・`stop_browser_preview`で片付け、summaryに証跡pathを残す。検証用Serverをsandbox内で起動しない。接続・起動・必要な確認ができなければ`decision: blocked`と具体的な理由を記載する。
 
 Contextの`hostVerificationCommands`に必要な検証が登録されていれば、`ralph_verification` MCPの`run_host_verification`を使う。`command`には登録済み配列をそのまま指定し、追加引数やcwdを指定しない。終了コードとログを読み、成功・失敗・skipを区別してsummaryに記録pathを含める。対象HEADと変更内容が検証時から変わっていないことを確認する。sandbox内のEPERMでskipされた検証も、ホスト側で実施できた範囲はその証拠を使う。未登録のコマンドをホストで実行しない。サーバーの起動・検証・停止まで完結するコマンドを使う。

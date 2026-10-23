@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/mcp_config.sh"
+
 PROVIDER_RESET_PARSER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/limit_reset.py"
 
 CODEX_BIN="${RALPH_AGENT_COMMAND:-$(jq -r '.codex.command // "codex"' "$RALPH_CONFIG_PATH")}"
@@ -30,6 +32,9 @@ provider_run() {
     --color never
   )
 
+  ralph_mcp_arguments codex "$project_root" || return 1
+  args+=(${RALPH_MCP_ARGS[@]+"${RALPH_MCP_ARGS[@]}"})
+
   if [[ -n "${RALPH_AGENT_MODEL:-}" ]]; then
     args+=(--model "$RALPH_AGENT_MODEL")
   fi
@@ -52,15 +57,6 @@ provider_run() {
   fi
 
   wacha_url_toml="$(jq -Rn --arg value "$WACHA_MCP_URL" '$value')"
-  if [[ "${GITHUB_ENABLED:-false}" == true ]] && jq -e '.mcpServers.ralph_verification' "$project_root/.ralph/mcp.json" >/dev/null; then
-    args+=(
-      -c "mcp_servers.ralph_verification.command=$(jq -c '.mcpServers.ralph_verification.command' "$project_root/.ralph/mcp.json")"
-      -c "mcp_servers.ralph_verification.args=$(jq -c '.mcpServers.ralph_verification.args' "$project_root/.ralph/mcp.json")"
-      -c 'mcp_servers.ralph_verification.default_tools_approval_mode="approve"'
-      -c 'mcp_servers.ralph_verification.required=true'
-      -c 'mcp_servers.ralph_verification.tool_timeout_sec=3660'
-    )
-  fi
   args+=(
     -c "mcp_servers.wacha.url=$wacha_url_toml"
     -c 'mcp_servers.wacha.bearer_token_env_var="WACHA_AGENT_NAME"'
@@ -71,15 +67,21 @@ provider_run() {
 
   (
     cd "$project_root"
-    exec "$CODEX_BIN" "${args[@]}" <"$prompt_path" 2>"$error_pipe"
+    local -a timeout_command=()
+    if (( ${RALPH_RECOVERY_TIMEOUT_SECONDS:-0} > 0 )); then
+      timeout_command=(python3 "$(dirname "$PROVIDER_RESET_PARSER")/agent_timeout.py" "$RALPH_RECOVERY_TIMEOUT_SECONDS")
+    fi
+    exec ${timeout_command[@]+"${timeout_command[@]}"} "$CODEX_BIN" "${args[@]}" <"$prompt_path" 2>"$error_pipe"
   ) &
   PROVIDER_PID=$!
+  if declare -F ralph_agent_started >/dev/null; then ralph_agent_started "$PROVIDER_PID"; fi
   if wait "$PROVIDER_PID"; then
     provider_status=0
   else
     provider_status=$?
   fi
   PROVIDER_PID=""
+  if declare -F ralph_agent_finished >/dev/null; then ralph_agent_finished "$provider_status"; fi
   wait "$tee_pid" 2>/dev/null || true
   rm -f "$error_pipe"
   if (( provider_status == 0 )); then
