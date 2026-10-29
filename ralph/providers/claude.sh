@@ -28,6 +28,10 @@ provider_run() {
   local error_log error_pipe error_tee_pid output_log output_pipe output_tee_pid provider_status
   local -a args=(--verbose -p "$(<"$prompt_path")")
 
+  if [[ -n "${RALPH_PREPARATION_DIRECTORY:-}" ]]; then
+    args+=(--add-dir "$RALPH_PREPARATION_DIRECTORY")
+  fi
+
   ralph_mcp_arguments claude "$project_root" || return 1
   args+=(${RALPH_MCP_ARGS[@]+"${RALPH_MCP_ARGS[@]}"})
 

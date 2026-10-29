@@ -40,6 +40,49 @@ class HostVerificationTest(unittest.TestCase):
         self.addCleanup(self.renewal.stop)
         self.addCleanup(self.directory.cleanup)
 
+    def test_reviewer_and_manager_execute_edited_preparation_copy_and_invalidate_old_evidence(self):
+        from ralph.lib.preparation_workspace import ensure_preparation, assert_preparation_verified
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts/prepare.py").write_text("print('pinned preparation')\n")
+        run("git", "add", "scripts/prepare.py", cwd=self.root)
+        run("git", "commit", "-m", "preparation", cwd=self.root)
+        for role in ("reviewer", "manager"):
+            cwd = self.root / ".ralph/worktrees" / role / role
+            run("git", "worktree", "add", "--detach", str(cwd), "HEAD", cwd=self.root)
+            config = json.loads(self.config.read_text())
+            config["roles"][role] = {"agentName": role}
+            command = [sys.executable, str(self.root / "scripts/prepare.py")]
+            config["verification"] = {"hostCommands": [command], "preparationFiles": ["scripts/prepare.py"]}
+            atomic_json(self.config, config)
+            claim = "claim-" + role
+            state = {"claimId": claim, "task": {"id": "task"}, "cwd": str(cwd)}
+            atomic_json(self.root / ".ralph/github-state" / role / (role + ".json"), state)
+            workflow = Workflow(self.config, role)
+            workspace = ensure_preparation(workflow)
+            script = Path(workspace["directory"]) / "scripts/prepare.py"
+            script.write_text("print('repaired preparation')\n")
+            server = VerificationServer(self.config, role, claim)
+            record = server.execute({"command": command})
+            self.assertEqual(record["status"], "passed")
+            self.assertTrue(record["sourceUnchanged"])
+            self.assertTrue(record["preparationUnchanged"])
+            self.assertEqual(record["executedCommand"], [sys.executable, str(script)])
+            self.assertIn("repaired preparation", Path(record["logPath"]).read_text())
+            self.assertEqual(["scripts/prepare.py"], assert_preparation_verified(workflow)["changedFiles"])
+            self.assertEqual("print('pinned preparation')\n", (cwd / "scripts/prepare.py").read_text())
+            script.write_text("print('edited after verification')\n")
+            with self.assertRaisesRegex(WorkflowError, "fresh successful"):
+                assert_preparation_verified(workflow)
+
+    def test_expired_verification_preserves_execution_and_requests_context_refresh(self):
+        with patch.object(Workflow, "renew", side_effect=WorkflowError("Wacha renew_claim: CLAIM_EXPIRED")):
+            with self.assertRaisesRegex(WorkflowError, "automatically"):
+                self.server.execute({"command": self.command})
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state["verificationRecoveryRequired"]["claimId"], "claim123")
+        self.assertEqual(state["cwd"], str(self.cwd))
+        self.assertFalse(list((self.root / ".ralph/verification").glob("**/*.log")))
+
     def approve(self, command):
         config = json.loads(self.config.read_text())
         config["verification"]["hostCommands"] = [command]
@@ -152,8 +195,10 @@ class HostVerificationTest(unittest.TestCase):
         subprocess.run(["bash", "-c", 'source "$PROVIDER"; provider_run "$PROMPT" "$WORKTREE"'], check=True,
             env={**os.environ, "PROVIDER": str(provider), "PROMPT": str(prompt), "WORKTREE": str(self.cwd),
                 "RALPH_CONFIG_PATH": str(self.config), "RALPH_AGENT_COMMAND": str(fake), "CAPTURE": str(capture),
+                "RALPH_PREPARATION_DIRECTORY": str(self.root / "preparation with spaces"),
                 "GITHUB_ENABLED": "true", "WACHA_MCP_URL": "http://unused/mcp"})
         arguments = capture.read_text()
+        self.assertIn("--add-dir\n" + str(self.root / "preparation with spaces") + "\n", arguments)
         self.assertIn("mcp_servers.ralph_verification.command=", arguments)
         self.assertIn("mcp_servers.ralph_verification.args=", arguments)
         self.assertIn("--claim-id", arguments)
@@ -163,10 +208,12 @@ class HostVerificationTest(unittest.TestCase):
         subprocess.run(["bash", "-c", 'source "$PROVIDER"; provider_run "$PROMPT" "$WORKTREE"'], check=True,
             env={**os.environ, "PROVIDER": str(helper.parent.parent / "providers/claude.sh"),
                 "PROMPT": str(prompt), "WORKTREE": str(self.cwd), "RALPH_CONFIG_PATH": str(self.config),
-                "RALPH_AGENT_COMMAND": str(fake), "CAPTURE": str(capture), "GITHUB_ENABLED": "true",
+                "RALPH_AGENT_COMMAND": str(fake), "CAPTURE": str(capture),
+                "RALPH_PREPARATION_DIRECTORY": str(self.root / "preparation with spaces"), "GITHUB_ENABLED": "true",
                 "BACKGROUND_CAPTURE": str(background_capture), "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "120000"})
         self.assertEqual(background_capture.read_text(), "0")
         self.assertIn("--strict-mcp-config", capture.read_text())
+        self.assertIn("--add-dir\n" + str(self.root / "preparation with spaces") + "\n", capture.read_text())
 
 
 if __name__ == "__main__":

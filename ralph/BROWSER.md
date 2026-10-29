@@ -31,7 +31,7 @@ Projectの `.ralph/config.json` にホストで起動する検証用Serverを設
 
 Contextの `browserVerificationEnabled` がtrueなら、`browserVerificationSkill` を読む。ProjectのMCP定義にManager用の設定を重ねた `.ralph/mcp.json` を、共通アダプターが各CLIの形式へ変換して渡す。Provider内にPlaywright固有の分岐は持たない。MCPの管理方法は [MCP設定](MCP.md) を参照する。Playwright MCPはAgentのsandbox内のshellから起動しない。初回npm取得とブラウザ本体の準備はホスト側で必要。
 
-`ralph_verification.start_browser_preview` を引数なしで呼び、返されたURLをPlaywrightで操作する。統合SHAと `headSha` を照合する。ログイン・テストデータ準備はRepositoryの手順を使う。正常・空状態・権限差・狭い画面・キーボード等をACに応じて確認する。見た目の確認はスクリーンショットを取得し、画像を読む。準備完了やHTTP成功だけでACを受け入れない。
+`ralph_verification.start_browser_preview` を通常は引数なしで呼び、返されたURLをPlaywrightで操作する。統合SHAと `headSha` を照合する。ログイン・テストデータ準備はRepositoryの手順を使う。正常・空状態・権限差・狭い画面・キーボード等をACに応じて確認する。見た目の確認はスクリーンショットを取得し、画像を読む。準備完了やHTTP成功だけでACを受け入れない。
 
 証跡は `.ralph/verification/<claimId>/browser/` に保持する。Playwrightのoutput directoryも同じ場所に設定し、worktreeの掃除後も残す。`session-*/preview.json` に対象SHA・source fingerprint・Serverログpath・開始/終了時刻・停止理由を記録する。環境変数は最小限のOS設定と明示した検証用envだけであり、RalphのGitHub tokenやWacha Credentialを継承しない。
 
@@ -54,3 +54,40 @@ Contextの `browserVerificationEnabled` がtrueなら、`browserVerificationSkil
 ## 検証データの不足への対応
 
 初期データだけでACの状態が揃わない場合は、Managerが利用先RepositoryのPolicyに従い、専用プレビューの公開API等で検証データを追加する。実行Contextの業務Task/Claimへの操作禁止と、専用環境の検証用Entity操作を区別する。許可する主体・操作・接続先はProjectが定め、共通Skillへ製品固有のAPIやDB構造を記載しない。未許可のホスト実行や運用データの変更を許可するものではない。
+
+## 用途別のプレビュー
+
+`verification.browser.profiles`に名前付きの起動設定を登録できる。各設定は`command`・`env`・`readyPath`・`setupCommands`を持ち、通常のpreviewと同じ制約を受ける。Agentはtools/listの`profile`候補から選び、`start_browser_preview({"profile":"catalog"})`で起動する。コマンド・環境変数・cwdの上書きはできない。切替前に`stop_browser_preview`を呼ぶ。製品画面・コンポーネントカタログ・build済みカタログを別設定にできる。
+
+Claim失効でホスト検証が止まった場合は進捗を保持してblocked結果を返す。RalphがClaimを再取得し、同じworktreeと証跡を引き継ぐ`verificationRetry` ContextでAgentを再起動する。復旧には既存の回数・時間・進捗制限を適用する。
+
+## MCPのTool発見と利用
+
+`use-mcp-tools`はAPMとRalph runtimeに同梱する。GitHub実行Contextの`mcpUsageSkill`、ブラウザ検証Skillから参照できる。対象サーバーの現在のTool契約を読み、ProjectのPolicyと検証用主体のGrant・scopeに従って必要な操作を選ぶ。Toolが公開されているだけでは操作の許可にならない。
+
+Projectは専用URL・データ保存先・検証用主体・Project/Workspace・対象Entity・目的で操作範囲を定義できる。その範囲の公開操作を許可するPolicyでは、manifestにあるTool名の観測一覧を追加の許可リストにしない。個別Tool名が許可条件となっているPolicyは明示的に変更されるまで守る。Project固有の操作名や業務規則は共通Skillへ取り込まない。
+
+この手順はホストコマンドの許可配列やサービスの認可を変更しない。MCP操作はAgentが判断し、Ralphは接続ContextとSkillを提供する。
+
+## 検証準備の編集境界
+
+Reviewer/Managerは、Project設定の`verification.preparationFiles`に指定したRepository相対ファイルの専用コピーを修正できる。未設定は編集不可。対象本体のSHAは固定したまま、準備コードの取得元を`verification.preparationRevision`の完全commit SHAで指定できる。省略時は本体と同じSHAを使う。ファイルはそのcommitのGit blobから取得するため、固定Project checkoutの古いコピーを使わない。必要なローカルimport先とPolicy文書も準備ファイルに含める。
+
+```json
+{
+  "verification": {
+    "preparationFiles": ["scripts/prepare-preview.mjs", "docs/preview-policy.md"],
+    "preparationRevision": "0123456789abcdef0123456789abcdef01234567"
+  }
+}
+```
+
+`verificationPreparation` Contextに専用directory・編集可能files・本体`headSha`・準備元`sourceSha`を返す。専用領域は`.ralph/verification/<worktreeClaimId>/preparation/`。Agentはこのコピーだけを変更する。本体、AC、期待結果、業務認可、Ralphの実行記録・ホスト許可コマンドは変更しない。
+
+登録済みホストコマンドとプレビューのcommand/setupCommandsで、宣言済み準備ファイルを直接指定する引数（Project rootまたはWorktreeの絶対path、Repository相対path）は専用コピーへ置き換える。元の許可配列との完全一致判定は維持する。npm script内や文字列内の参照は書き換えないため、準備ファイルを直接引数に指定する。
+
+変更した内容は実行記録の外側に版ごと保存する。検証記録には本体SHA・取得元SHA・準備fingerprint・差分path・`preparationUnchanged`を残す。prepare/host/previewでsymlink・範囲外ファイル・取得元変更を拒否する。準備を変更した実行のapprove/acceptには、同じClaim・本体SHA・現在の準備版で成功したホスト検証または正常停止したpreviewの証跡が必要。どのACが満たされたかはAgentが判断する。Reject/保留でも準備差分を保存し、失敗を成功に変換しない。
+
+準備コードの変更で本体の不具合や不一致を隠さず、影響する検証を再実行する。恒久化する準備修正は保存した差分から通常のTask/PRへ戻す。専用コピーはWorktree清掃後も証跡とともに保持する。
+
+Codex/Claude Codeには専用準備directoryだけを追加作業領域として渡す。sandbox全体を無効化したり、制御記録・証跡directory全体へ書込みを広げたりしない。

@@ -13,6 +13,12 @@ applyTo: "**/*"
 - シークレット、`.env`、秘密鍵、認証情報を出力に含めない。
 - 繰り返し作業を自動化できる場合は、再利用可能な Skill またはスクリプトを提案・作成する。
 
+## MCPの利用
+
+- MCP操作では`use-mcp-tools` Skillに従い、対象サーバーの現在のTool契約とProjectのPolicy・主体・scopeを照合する。
+- 共通Instruction/Skillへ製品固有のTool名の許可一覧を固定しない。Toolの公開・発見と、操作権限・今回の許可を混同しない。
+- Projectが環境・主体・対象scope・目的で許可した公開操作は、その範囲で選択して進める。明示的な個別許可リストやサーバー認可は迂回しない。
+
 ## 検証プロセスの所有権
 
 - Agentが停止してよいのは、自身が検証のために起動したプロセスだけとする。人、他のAgent、外部のプロセス管理機構が起動したサービスは停止・再起動しない。
@@ -46,3 +52,9 @@ applyTo: "**/*"
 - request 処理、application use case、domain logic、infrastructure adapter を分離する。Controller は request の検証・変換を担い、Use Case は業務操作を統合し、Repository と外部 client は interface の背後に置く。
 - Bounded Context ごとに model と rule の所有権を保つ。database entity や内部 domain model を Context 間で共有せず、明示的な contract を介して連携する。
 - これらの境界を保つ最小限の設計を選ぶ。具体的なドメイン上または保守上の必要性なく、layer、interface、aggregate、pattern を導入しない。
+
+## レビュー・受入中の検証準備
+
+- Reviewer/Managerは検証対象の本体、AC、期待結果、業務認可を固定する。準備の不足は、Projectが明示した専用領域の準備コード・fixture・検証用設定を修正して解消できる。
+- 準備側の変更理由・取得元の版・差分・再検証結果を記録する。期待値を緩めたり製品不具合を準備側で隠して成功させない。本体修正はWorkerへ戻す。
+- Ralph Contextに`verificationPreparation`があれば、その専用コピーと列挙したファイルだけを使う。実行対象の本体Worktree・固定Project checkout・Ralphの実行記録やホスト許可配列を変更しない。

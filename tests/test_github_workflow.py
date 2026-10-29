@@ -79,8 +79,8 @@ class FakeWorkflow(Workflow):
             state["task"]["status"] = "in_review"
         elif name == "reviewed_task":
             state["task"]["status"] = "wait_accept"
-            pr = state["prs"][state["history"][-1]["number"]]
-            state["history"][-1].update(state="merged", mergeSha=pr["merge_commit_sha"], reviewedHeadSha=pr["head"]["sha"])
+            pr = state["prs"][state["history"][-1]["number"]] if state["history"] else None
+            if pr: state["history"][-1].update(state="merged", mergeSha=pr["merge_commit_sha"], reviewedHeadSha=pr["head"]["sha"])
         elif name == "reject_task":
             state["task"]["status"] = "rejected"
         elif name == "accept_task":
@@ -171,6 +171,56 @@ class GitHubWorkflowTest(unittest.TestCase):
         atomic_json(Path(context["resultPath"]), {"decision": "complete", "summary": summary, "files": ["app.txt"], "commitMessage": "Implement Task"})
         worker.finish()
         return worker, context
+
+    def test_evidence_task_runs_all_roles_without_commit_or_pull_request(self):
+        self.remote["task"]["completionMode"] = "evidence"
+        for role, decision in (("worker", "complete"), ("reviewer", "approve"), ("manager", "accept")):
+            execution = FakeWorkflow(self.config, role, self.remote)
+            context = execution.prepare()
+            self.assertTrue(Path(context["mcpUsageSkill"]).is_file())
+            atomic_json(Path(context["resultPath"]), {"decision": decision, "summary": "Operational evidence independently verified", "files": []})
+            execution.finish()
+            self.assertFalse(Path(context["cwd"]).exists(), "Completed evidence Task must free the Principal worktree")
+        self.assertEqual(self.remote["task"]["status"], "accepted")
+        self.assertEqual(self.remote["prs"], {})
+        self.assertEqual(self.remote["history"], [])
+
+    def test_completed_evidence_cleanup_precedes_interrupted_deferred_restore(self):
+        blocked = dict(self.remote["task"])
+        worker = FakeWorkflow(self.config, "worker", self.remote)
+        context = worker.prepare()
+        atomic_json(Path(context["resultPath"]), {"decision": "blocked", "summary": "Wait for prerequisite"})
+        with self.assertRaises(RecoveryDeferred):
+            worker.finish()
+        deferred = next(worker.deferred_records())[1]
+        self.remote["task"] = {"id": "operation-2", "title": "Operation", "status": "todo", "completionMode": "evidence"}
+        operation = FakeWorkflow(self.config, "worker", self.remote)
+        context = operation.prepare()
+        atomic_json(Path(context["resultPath"]), {"decision": "complete", "summary": "Operational evidence verified", "files": []})
+        with patch.object(operation, "cleanup_worktree", side_effect=WorkflowError("temporary cleanup fault")):
+            operation.finish()
+        self.remote["task"] = blocked
+        resumed = FakeWorkflow(self.config, "worker", self.remote)
+        resumed.state = {**deferred, "restorePending": True}
+        resumed.save()
+        context = resumed.prepare()
+        self.assertFalse(context.get("pending"))
+        self.assertEqual(context["task"]["id"], "task-1")
+        self.assertTrue(Path(context["cwd"]).exists())
+        completed = next(resumed.state_path.parent.glob("completed/worker-*.json"))
+        self.assertEqual(json.loads(completed.read_text())["cleanup"], "removed")
+
+    def test_evidence_task_cannot_hide_source_changes(self):
+        self.remote["task"]["completionMode"] = "evidence"
+        worker = FakeWorkflow(self.config, "worker", self.remote)
+        context = worker.prepare()
+        (Path(context["cwd"]) / "app.txt").write_text("source change")
+        atomic_json(Path(context["resultPath"]), {"decision": "complete", "summary": "Operation done", "files": []})
+        with self.assertRaises(Exception) as error:
+            worker.finish()
+        self.assertIn("Evidence Tasks", str(error.exception))
+        self.assertEqual(self.remote["task"]["status"], "doing")
+        self.assertEqual(self.remote["prs"], {})
 
     def test_pr_and_review_preserve_markdown_and_review_receipt(self):
         summary = "### 変更内容\n\n- `app.txt` を更新\n\n### 検証結果\n\n- **成功**\n- 未検証事項も記載"
@@ -825,6 +875,23 @@ class GitHubWorkflowTest(unittest.TestCase):
         self.assertTrue(worker.state_path.exists())
         self.assertFalse(list(outside.iterdir()))
 
+    def test_expired_host_verification_restarts_agent_without_deferring_or_losing_changes(self):
+        worker, cwd = self.manifest_worker(["app.txt"])
+        (cwd / "app.txt").write_text("unfinished implementation\n")
+        worker.state["verificationRecoveryRequired"] = {"claimId": worker.state["claimId"], "reason": "claim_expired"}
+        worker.save()
+        self.remote["expiredClaims"] = {worker.state["claimId"]}
+        atomic_json(Path(worker.state["resultPath"]), {"decision": "blocked", "summary": "Host Claim expired"})
+        with self.assertRaises(ReviewRepairScheduled):
+            worker.finish()
+        state = FakeWorkflow(self.config, "worker", self.remote)
+        context = state.prepare()
+        self.assertFalse(context.get("pending", False))
+        self.assertIn("verificationRetry", context)
+        self.assertEqual((cwd / "app.txt").read_text(), "unfinished implementation\n")
+        self.assertEqual(json.loads(Path(context["verificationRetry"]["previousResultPath"]).read_text())["decision"], "blocked")
+        self.assertFalse(list(worker.deferred_records()))
+
     def test_resume_reexecutes_blocked_task_with_a_fresh_claim_and_keeps_evidence(self):
         worker, cwd = self.manifest_worker(["app.txt"])
         atomic_json(Path(worker.state["resultPath"]), {"decision": "blocked", "summary": "Need preview data"})
@@ -1016,6 +1083,16 @@ class GitHubWorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "Staged paths"):
             worker.finish()
         self.assertFalse(self.remote["prs"])
+
+    def test_reviewer_cannot_add_untracked_product_files(self):
+        self.worker()
+        reviewer = FakeWorkflow(self.config, "reviewer", self.remote)
+        context = reviewer.prepare()
+        (Path(context["cwd"]) / "new-product-module.txt").write_text("unreviewed source")
+        atomic_json(Path(context["resultPath"]), {"decision": "approve", "summary": "Review complete"})
+        with self.assertRaisesRegex(WorkflowError, "untracked product"):
+            reviewer.finish()
+        self.assertFalse(self.remote["prs"][1]["merged"])
 
     def test_reviewer_cannot_approve_modified_checkout(self):
         self.worker()

@@ -73,6 +73,7 @@ Runtime設定は、当面はこのリポジトリをcloneして生成した`dist
 - `investigate-bug`: 不具合を再現・切り分けし、最小限の修正と検証を行う
 - [`recover-agent-execution`](.apm/skills/recover-agent-execution/SKILL.md): Git・PR・結果反映で停止したAgent実行を調査し、成果物を保持して復旧する
 - `review-documentation-impact`: 実装変更のドキュメント影響を判定し、Workerによる更新とReviewerによる整合性確認を行う
+- [`use-mcp-tools`](.apm/skills/use-mcp-tools/SKILL.md): MCPの現在のTool契約とProjectの許可範囲を照合し、操作・検証データ準備・失敗の切り分けを行う
 - [`verify-browser-ac`](.apm/skills/verify-browser-ac/SKILL.md): Playwright MCPでUIの受入条件を独立に確認し、操作結果・画像・未検証範囲を残す
 
 ## Ralph Runner

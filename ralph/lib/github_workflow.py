@@ -120,6 +120,11 @@ class Workflow(OperationRecovery):
             from .host_verification import commands
         else:
             from host_verification import commands
+        if __package__:
+            from .preparation_workspace import preparation_files
+        else:
+            from preparation_workspace import preparation_files
+        preparation_files(self.config)
         return commands(self.config)
 
     def agent_mcp_config(self, claim_id: str) -> dict:
@@ -272,6 +277,7 @@ class Workflow(OperationRecovery):
             raise WorkflowError("origin must match the Wacha Project GitHub repository")
 
     def prepare(self) -> dict:
+        self.retry_completed_cleanup()
         if self.state.get("restorePending"):
             self.finish_restore()
         if self.state.get("deferred"):
@@ -285,7 +291,6 @@ class Workflow(OperationRecovery):
         if not self.state:
             self.restore_deferred()
         self.host_commands()  # Reject invalid host configuration before acquiring a Claim.
-        self.retry_completed_cleanup()
         if self.state.get("completed"):
             return {**self.state, "pending": True}
         projects = self.mcp("list_projects", {})["projects"]
@@ -337,7 +342,17 @@ class Workflow(OperationRecovery):
         self.state["pullRequests"] = history
         branch = self.workflow["baseBranch"]
         self.git_remote("fetch", f"refs/heads/{branch}:refs/remotes/origin/{branch}", self.root)
-        if self.role == "worker":
+        if self.state["task"].get("completionMode") == "evidence":
+            if history:
+                raise WorkflowError("Evidence Task unexpectedly has PR history; retain execution")
+            start = run("git", "rev-parse", f"origin/{branch}", cwd=self.root)
+            if self.role == "worker":
+                self.state.setdefault("branch", f"ralph/{self.state['task']['id']}/{self.state['claimId'][:8]}")
+            elif self.role == "manager":
+                self.state["expectedMergeSha"] = start
+            else:
+                self.state["expectedHeadSha"] = start
+        elif self.role == "worker":
             if history and history[-1]["state"] == "open":
                 pr = self.github(f"{self.repo_path()}/pulls/{history[-1]['number']}")
                 if pr["state"] == "open":
@@ -397,6 +412,13 @@ class Workflow(OperationRecovery):
                 run(*command, cwd=directory)
             self.state["setupDone"] = True
         self.state["cwd"] = str(directory)
+        if __package__:
+            from .preparation_workspace import ensure_preparation
+        else:
+            from preparation_workspace import ensure_preparation
+        preparation = ensure_preparation(self)
+        if preparation is not None:
+            self.state["verificationPreparation"] = preparation
         self.state["resultPath"] = str(directory / ".ralph-result.json")
         self.state.setdefault("initialHeadSha", run("git", "rev-parse", "HEAD", cwd=directory))
         # Keep the trusted Project definitions and Claim-bound additions in the execution worktree.
@@ -417,6 +439,7 @@ class Workflow(OperationRecovery):
         return {**self.state, "workflow": self.workflow, "hostVerificationCommands": self.host_commands(),
             "browserVerificationEnabled": browser_enabled,
             "browserVerificationSkill": str(skill) if browser_enabled else None,
+            "mcpUsageSkill": str(skill.parent.parent / "use-mcp-tools/SKILL.md"),
             "recoveryTimeoutSeconds": self.recovery_remaining() if self.state.get("recoveryBudget") else 0}
 
     def renew(self) -> None:
@@ -536,7 +559,7 @@ class Workflow(OperationRecovery):
         if f"worktree {directory}" not in registered:
             raise WorkflowError("Checkout is not a registered Ralph worktree")
         sha = execution.get({"worker": "commitSha", "reviewer": "expectedHeadSha", "manager": "expectedMergeSha"}[self.role])
-        if self.role == "worker" and released and not sha:
+        if self.role == "worker" and (released or execution.get("task", {}).get("completionMode") == "evidence") and not sha:
             sha = execution.get("initialHeadSha")
         if not sha or run("git", "rev-parse", "HEAD", cwd=directory) != sha:
             raise WorkflowError("Worktree contains an unexpected commit")
@@ -650,6 +673,28 @@ class Workflow(OperationRecovery):
             self.state["pendingResult"] = result
             self.save()
         decision = result.get("decision")
+        if self.role in {"reviewer", "manager"}:
+            if __package__:
+                from .preparation_workspace import assert_preparation_verified, preparation_snapshot
+            else:
+                from preparation_workspace import assert_preparation_verified, preparation_snapshot
+            snapshot = assert_preparation_verified(self) if decision in {"approve", "accept"} else preparation_snapshot(self)
+            if snapshot is not None:
+                self.state["verificationPreparationEvidence"] = snapshot
+                self.save()
+
+        if decision == "blocked" and self.state.get("verificationRecoveryRequired"):
+            attempt, limit = self.reserve_recovery_budget("verification_context", "Claim expired during host verification")
+            directory = self.root / ".ralph/verification" / self.state.get("worktreeClaimId", self.state["claimId"]) / "verification-retry" / str(attempt)
+            atomic_json(directory / "execution.json", self.state)
+            atomic_json(directory / "result.json", result)
+            self.state["verificationRetry"] = {"attempt": attempt, "limit": limit, "previousResultPath": str(directory / "result.json"),
+                "instruction": "Ralph refreshed the expired verification Context. Preserve previous work and verified evidence, rerun the unfinished host/browser verification, and produce a fresh decision."}
+            self.state.pop("pendingResult", None)
+            self.state.pop("verificationRecoveryRequired", None)
+            Path(self.state["resultPath"]).unlink(missing_ok=True)
+            self.save()
+            raise ReviewRepairScheduled("Verification Context refreshed; rerun unfinished checks with retained work")
         if decision == "blocked":
             self.note(result["summary"])
             self.command("release_claim", {"reason": result["summary"]})
@@ -658,6 +703,14 @@ class Workflow(OperationRecovery):
             raise RecoveryDeferred("Agent deferred this Task: " + result["summary"][:1000])
         if self.role != "worker" and run("git", "status", "--porcelain", "--untracked-files=no", cwd=Path(self.state["cwd"])):
             raise WorkflowError("Reviewer/Manager modified tracked files; decision is not valid for the pinned commit")
+        if self.role in {"reviewer", "manager"}:
+            cwd = Path(self.state["cwd"])
+            expected = self.state.get("expectedHeadSha" if self.role == "reviewer" else "expectedMergeSha")
+            if expected and run("git", "rev-parse", "HEAD", cwd=cwd) != expected:
+                raise WorkflowError("Reviewer/Manager changed the pinned product HEAD")
+            untracked = run("git", "ls-files", "--others", "--exclude-standard", "-z", cwd=cwd).split("\0")
+            if any(name and not name.startswith(".ralph/") and name != ".ralph-result.json" for name in untracked):
+                raise WorkflowError("Reviewer/Manager added untracked product files; use the preparation workspace or artifact directory")
         if self.role == "worker" and decision == "complete":
             try:
                 self.finish_worker(result)
@@ -799,6 +852,14 @@ class Workflow(OperationRecovery):
 
     def finish_worker(self, result: dict) -> None:
         cwd = Path(self.state["cwd"])
+        if self.state["task"].get("completionMode") == "evidence":
+            changed = run("git", "status", "--porcelain", cwd=cwd)
+            head = run("git", "rev-parse", "HEAD", cwd=cwd)
+            if result.get("files") != [] or changed or head != self.state["initialHeadSha"]:
+                raise WorkerRepairNeeded("evidence_manifest", "Evidence Tasks require files: [], unchanged source and no commits; report operational evidence instead of a fake PR")
+            self.note(result["summary"])
+            self.transition("complete_task")
+            return
         if not self.state.get("commitSha"):
             head = run("git", "rev-parse", "HEAD", cwd=cwd)
             if head != self.state["initialHeadSha"]:
@@ -883,6 +944,13 @@ class Workflow(OperationRecovery):
         self.transition("complete_task")
 
     def finish_review(self, result: dict) -> None:
+        if self.state["task"].get("completionMode") == "evidence":
+            self.note(result["summary"])
+            if result["decision"] == "approve":
+                self.transition("reviewed_task")
+            else:
+                self.transition("reject_task", {"reason": result["summary"]})
+            return
         number = self.state["pullRequests"][-1]["number"]
         path = f"{self.repo_path()}/pulls/{number}"
         pr = self.github(path)

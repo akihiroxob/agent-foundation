@@ -178,3 +178,9 @@ Workerが前提Taskの変更を取り込むためにHEADを進めた場合、Ral
 根拠・前回の判断・診断結果は`.ralph/verification/<worktreeClaimId>/operation-recovery/<attempt>/`へ保存する。保留の実行記録は`.ralph/github-state/<principal>/deferred/`、Worktreeは`.ralph/worktrees/<principal>/deferred/<role>-<claimId>`へ保存する。該当Roleは他PrincipalでもそのTaskを再選択しない。Claim解放済みの`blocked`は、同じProjectの別Taskに保留時点より新しいAccepted更新があると、所有Principalが保存したWorktreeと証跡を引き継いで自動再評価する。Accepted更新を前提解消と決めつけず、Agentが再判断する。再び保留した場合は新しい保留時点を基準とし、同じ更新で再起動しない。成否不明の操作・復旧Agentによる保留は自動再開しない。Role選択時の実行可能数からも保留Taskを除外し、他のRoleに実行可能なTaskがあればそちらへ進む。`ralph status`でRunner・Agent・結果反映・保留理由と実行記録の場所を確認できる。
 
 原因を解消して`ralph resume <role> --principal <principal>`を実行すると、同じPrincipalの保留Taskが次の実行準備で再開対象になる。再開対象は新規取得候補の有無にかかわらず復元する。保存したClaimがまだ有効で候補一覧に出ない場合も、現在の所有・期限・段階を照合して引き継ぐ。実行中のTaskがあればその終了後に引き継ぎ、保存したWorktree・操作結果を復元してClaim等を照合する。明示的なresumeで復旧予算を更新する。`blocked`で保留したTaskは、以前の判断を証跡へ退避し、新しいClaimでRoleを起動して再判定する。成否不明の操作の再試行では保存済み結果を保持して照合する。成否不明の結果を成功・失敗へ手動で書き換えない。
+
+## 変更を伴わない運用Task
+
+Taskの`completionMode`は通常`pull_request`。ManagerがRepository変更を必要としない運用Taskに`evidence`を選択した場合、Workerは`files: []`と操作・検証の証跡を返す。Ralphは未変更のworktreeを確認して完了を反映し、PR・commitを作成しない。Reviewerの独立検証とManagerのAC受入は通常どおり必要。Workerが自己判断でモードを変更したり、PR必須のTaskを証跡だけで完了させたりすることはできない。
+
+Reviewer/Managerは検証対象Worktreeを変更せず、[検証準備の編集境界](BROWSER.md#検証準備の編集境界)に従いProjectが宣言した実行専用の準備ファイルを修正できる。準備側の版・差分と再検証を記録し、本体のSHA・AC・期待結果・業務規則を固定する。準備の修正を本体へのcommit/mergeや既存結果の無条件な再送として扱わない。

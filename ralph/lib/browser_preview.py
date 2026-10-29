@@ -19,13 +19,25 @@ else:
     from github_workflow import WorkflowError, atomic_json, run
 
 
-def browser_config(config: dict) -> dict | None:
+def browser_config(config: dict, profile: str | None = None) -> dict | None:
     section = config.get("verification", {})
     if not isinstance(section, dict):
         raise WorkflowError("verification must be an object")
     value = section.get("browser")
     if value is None:
         return None
+    if isinstance(value, dict):
+        profiles = value.get("profiles", {})
+        if not isinstance(profiles, dict) or any(not isinstance(name, str) or not name or not isinstance(entry, dict) or "profiles" in entry for name, entry in profiles.items()):
+            raise WorkflowError("verification.browser.profiles must map names to approved preview configurations")
+        for entry in profiles.values():
+            browser_config({"verification": {"browser": entry}})
+        if profile is not None:
+            if profile not in profiles:
+                raise WorkflowError("Unknown Project-approved browser profile")
+            value = profiles[profile]
+        else:
+            value = {key: item for key, item in value.items() if key != "profiles"}
     if not isinstance(value, dict) or set(value) - {"command", "env", "readyPath", "setupCommands"}:
         raise WorkflowError("verification.browser must contain command, optional env, readyPath and setupCommands")
     command = value.get("command")
@@ -95,15 +107,18 @@ class PreviewSession:
         self.finished = threading.Event()
 
     def start(self, arguments: dict) -> dict:
-        if arguments != {}:
-            raise WorkflowError("start_browser_preview takes no arguments; configuration is owned by the Project")
+        if not isinstance(arguments, dict) or set(arguments) - {"profile"} or ("profile" in arguments and not isinstance(arguments["profile"], str)):
+            raise WorkflowError("start_browser_preview accepts only an approved profile name; no command overrides")
+        profile = arguments.get("profile")
         with self.lock:
             workflow = self.owner.active_workflow()
-            settings = browser_config(workflow.config)
+            settings = browser_config(workflow.config, profile)
             if self.owner.role != "manager" or settings is None:
                 raise WorkflowError("Browser preview is only enabled for Manager with verification.browser")
             if self.process is not None:
                 if self.process.poll() is None:
+                    if self.record.get("profile") != profile:
+                        raise WorkflowError("Stop the current preview before switching profiles")
                     return self.record
                 self.stop("server_exited")
                 raise WorkflowError("Preview server exited; inspect its log before retrying")
@@ -117,7 +132,12 @@ class PreviewSession:
                 port = probe.getsockname()[1]
             def expand(value):
                 return value.replace("{port}", str(port)).replace("{dataDir}", str(data))
-            command = [expand(s) for s in settings["command"]]
+            if __package__:
+                from .preparation_workspace import preparation_command, preparation_snapshot
+            else:
+                from preparation_workspace import preparation_command, preparation_snapshot
+            preparation = preparation_snapshot(workflow)
+            command = preparation_command(workflow, [expand(s) for s in settings["command"]])
             if __package__:
                 from .host_verification import SAFE_ENV, fingerprint
             else:
@@ -125,8 +145,8 @@ class PreviewSession:
             cwd = Path(workflow.state["cwd"])
             self.record_path = directory / "preview.json"
             self.record = {"taskId": workflow.state["task"]["id"], "claimId": self.owner.claim_id,
-                "role": self.owner.role, "cwd": str(cwd), "headSha": run("git", "rev-parse", "HEAD", cwd=cwd),
-                "sourceFingerprint": fingerprint(cwd), "url": f"http://127.0.0.1:{port}",
+                "role": self.owner.role, "profile": profile, "cwd": str(cwd), "headSha": run("git", "rev-parse", "HEAD", cwd=cwd),
+                "preparationWorkspace": preparation, "executedCommand": command, "sourceFingerprint": fingerprint(cwd), "url": f"http://127.0.0.1:{port}",
                 "artifactDirectory": str(artifacts), "recordPath": str(self.record_path), "dataDirectory": str(data), "logPath": str(directory / "server.log"),
                 "startedAt": int(time.time() * 1000), "status": "starting"}
             atomic_json(self.record_path, self.record)
@@ -138,7 +158,7 @@ class PreviewSession:
                 for index, setup in enumerate(settings["setupCommands"]):
                     self.owner.active_workflow()
                     setup_log = directory / f"setup-{index + 1}.log"
-                    entry = {"command": [expand(arg) for arg in setup], "logPath": str(setup_log), "exitCode": None}
+                    entry = {"command": preparation_command(workflow, [expand(arg) for arg in setup]), "logPath": str(setup_log), "exitCode": None}
                     self.record["preparation"].append(entry)
                     atomic_json(self.record_path, self.record)
                     with setup_log.open("w") as output:
@@ -229,6 +249,14 @@ class PreviewSession:
                     from .host_verification import fingerprint
                 else:
                     from host_verification import fingerprint
+                if __package__:
+                    from .preparation_workspace import preparation_snapshot
+                    from .github_workflow import Workflow
+                else:
+                    from preparation_workspace import preparation_snapshot
+                    from github_workflow import Workflow
+                workflow = Workflow(self.owner.config, self.owner.role, self.owner.principal)
+                self.record["preparationUnchanged"] = self.record.get("preparationWorkspace") == preparation_snapshot(workflow)
                 cwd = Path(self.record["cwd"])
                 self.record["sourceUnchanged"] = self.record["sourceFingerprint"] == fingerprint(cwd) and self.record["headSha"] == run("git", "rev-parse", "HEAD", cwd=cwd)
             finally:

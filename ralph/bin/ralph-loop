@@ -491,6 +491,7 @@ while true; do
   fi
   backend_print_status "$role" "$summary"
   execution_root="$PROJECT_ROOT"
+  RALPH_PREPARATION_DIRECTORY=""
   recovery_run=false
   recovery_timeout_seconds=0
   heartbeat_pid=""
@@ -504,6 +505,7 @@ while true; do
       active_task_id="$(jq -r '.task.id // ""' <<<"$context")"
       active_task_title="$(jq -r '.task.title // ""' <<<"$context")"
       execution_root="$(jq -r '.cwd' <<<"$context")"
+      RALPH_PREPARATION_DIRECTORY="$(jq -r '.verificationPreparation.directory // ""' <<<"$context")"
       recovery_run="$(jq -r '.recovery // false' <<<"$context")"
       recovery_timeout_seconds="$(jq -r '.recoveryTimeoutSeconds // 0' <<<"$context")"
       if [[ "$(jq -r '.pending // false' <<<"$context")" != true ]]; then

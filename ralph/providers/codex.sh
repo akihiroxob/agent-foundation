@@ -32,6 +32,10 @@ provider_run() {
     --color never
   )
 
+  if [[ -n "${RALPH_PREPARATION_DIRECTORY:-}" ]]; then
+    args+=(--add-dir "$RALPH_PREPARATION_DIRECTORY")
+  fi
+
   ralph_mcp_arguments codex "$project_root" || return 1
   args+=(${RALPH_MCP_ARGS[@]+"${RALPH_MCP_ARGS[@]}"})
 

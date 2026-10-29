@@ -73,7 +73,14 @@ class VerificationServer:
         registered = run("git", "worktree", "list", "--porcelain", "-z", cwd=workflow.root).split("\0")
         if f"worktree {cwd}" not in registered:
             raise WorkflowError("Verification cwd is not a registered worktree")
-        workflow.renew()
+        try:
+            workflow.renew()
+        except WorkflowError as error:
+            if "CLAIM_EXPIRED" in str(error):
+                workflow.state["verificationRecoveryRequired"] = {"claimId": self.claim_id, "reason": "claim_expired"}
+                workflow.save()
+                raise WorkflowError("Verification Claim expired. Preserve progress and return blocked; Ralph will refresh this execution and rerun verification automatically.") from error
+            raise
         return workflow
 
     def execute(self, arguments: dict) -> dict:
@@ -92,16 +99,22 @@ class VerificationServer:
         record_path = directory / f"{uuid.uuid4().hex}.json"
         self.last_record = record_path
         log_path = record_path.with_suffix(".log")
+        if __package__:
+            from .preparation_workspace import preparation_command, preparation_snapshot
+        else:
+            from preparation_workspace import preparation_command, preparation_snapshot
+        preparation = preparation_snapshot(workflow)
+        executed = preparation_command(workflow, command)
         record = {"taskId": state["task"]["id"], "claimId": self.claim_id, "role": self.role,
             "cwd": str(cwd), "command": command, "headSha": run("git", "rev-parse", "HEAD", cwd=cwd),
             "sourceFingerprint": fingerprint(cwd), "logPath": str(log_path), "startedAt": int(time.time() * 1000),
-            "status": "running", "exitCode": None}
+            "status": "running", "exitCode": None, "executedCommand": executed, "preparationWorkspace": preparation}
         atomic_json(record_path, record)
         process = None
         try:
             with log_path.open("w", encoding="utf-8") as log:
                 # Child runtimes must not alter the MCP input pipe or consume its requests.
-                process = subprocess.Popen(command, cwd=cwd, env={k: v for k, v in os.environ.items() if k in SAFE_ENV},
+                process = subprocess.Popen(executed, cwd=cwd, env={k: v for k, v in os.environ.items() if k in SAFE_ENV},
                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 deadline = time.monotonic() + TIMEOUT_SECONDS
                 while True:
@@ -114,8 +127,9 @@ class VerificationServer:
                     except subprocess.TimeoutExpired:
                         if time.monotonic() >= deadline:
                             raise
-                        workflow.renew()
+                        self.active_workflow()
             record["status"] = "passed" if record["exitCode"] == 0 else "failed"
+            record["preparationUnchanged"] = preparation == preparation_snapshot(workflow)
             record["sourceUnchanged"] = record["sourceFingerprint"] == fingerprint(cwd)
             if run("git", "rev-parse", "HEAD", cwd=cwd) != record["headSha"]:
                 record["sourceUnchanged"] = False
@@ -164,7 +178,12 @@ class VerificationServer:
                 from browser_preview import browser_config
             if self.role == "manager" and browser_config(Workflow(self.config, self.role, self.principal).config):
                 for name, description in (("start_browser_preview", "Start the Project-approved preview server on the host for this Manager worktree. Returns URL, SHA and artifact directory. No command overrides."), ("stop_browser_preview", "Stop this preview and record whether its source/HEAD changed. Does not accept a PID.")):
-                    result["tools"].append({"name": name, "description": description, "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}})
+                    properties = {}
+                    if name == "start_browser_preview":
+                        profiles = Workflow(self.config, self.role, self.principal).config.get("verification", {}).get("browser", {}).get("profiles", {})
+                        if profiles:
+                            properties["profile"] = {"type": "string", "enum": sorted(profiles), "description": "Project-approved preview target; omitted uses the product preview"}
+                    result["tools"].append({"name": name, "description": description, "inputSchema": {"type": "object", "properties": properties, "additionalProperties": False}})
         elif method == "tools/call":
             params = request.get("params", {})
             try:

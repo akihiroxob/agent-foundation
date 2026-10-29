@@ -49,6 +49,44 @@ class BrowserPreviewTest(unittest.TestCase):
         self.server = VerificationServer(self.config, "manager", "claim123")
         self.addCleanup(self.server.preview.stop)
 
+    def test_preview_uses_preparation_copy_and_records_edits_after_start(self):
+        self.require_loopback()
+        from ralph.lib.preparation_workspace import assert_preparation_verified
+        (self.root / "scripts").mkdir()
+        (self.root / "scripts/start.py").write_text(self.command[-1])
+        run("git", "add", "scripts/start.py", cwd=self.root)
+        run("git", "commit", "-m", "preview preparation", cwd=self.root)
+        run("git", "checkout", "--detach", "main", cwd=self.cwd)
+        self.settings["verification"]["preparationFiles"] = ["scripts/start.py"]
+        self.settings["verification"]["browser"]["command"] = [sys.executable, "-u", str(self.root / "scripts/start.py")]
+        atomic_json(self.config, self.settings)
+        record = self.server.preview.start({})
+        script = Path(record["preparationWorkspace"]["directory"]) / "scripts/start.py"
+        self.assertEqual(record["executedCommand"][-1], str(script))
+        script.write_text(script.read_text() + "\n# fix preparation\n")
+        stopped = self.server.preview.stop()
+        self.assertTrue(stopped["sourceUnchanged"])
+        self.assertFalse(stopped["preparationUnchanged"])
+        with self.assertRaises(WorkflowError):
+            assert_preparation_verified(Workflow(self.config, "manager"))
+        self.server.preview.start({})
+        stopped = self.server.preview.stop()
+        self.assertTrue(stopped["preparationUnchanged"])
+        self.assertEqual(["scripts/start.py"], assert_preparation_verified(Workflow(self.config, "manager"))["changedFiles"])
+
+    def test_only_registered_preview_profiles_are_selectable(self):
+        self.settings["verification"]["browser"]["profiles"] = {"catalog": {"command": ["npm", "run", "catalog:dev"]}}
+        atomic_json(self.config, self.settings)
+        self.assertEqual(browser_config(self.settings, "catalog")["command"], ["npm", "run", "catalog:dev"])
+        with self.assertRaisesRegex(WorkflowError, "Unknown Project"):
+            browser_config(self.settings, "unapproved")
+        tools = self.server.handle({"id": 1, "method": "tools/list"})["result"]["tools"]
+        start = next(tool for tool in tools if tool["name"] == "start_browser_preview")
+        self.assertEqual(start["inputSchema"]["properties"]["profile"]["enum"], ["catalog"])
+        result = self.server.handle({"id": 2, "method": "tools/call", "params": {"name": "start_browser_preview", "arguments": {"profile": "unapproved"}}})["result"]
+        self.assertTrue(result["isError"])
+        self.assertIsNone(self.server.preview.process)
+
     def require_loopback(self):
         with socket.socket() as probe:
             try:
@@ -80,6 +118,20 @@ class BrowserPreviewTest(unittest.TestCase):
             atomic_json(self.root / ".mcp.json", {"mcpServers": {"playwright": {**self.playwright, "args": args}}})
             with self.assertRaises(WorkflowError):
                 playwright_config(self.root)
+
+    def test_registered_profiles_start_stop_and_switch_independently(self):
+        self.require_loopback()
+        self.settings["verification"]["browser"]["profiles"] = {"catalog": {"command": self.command,
+            "env": {"PORT": "{port}", "FIXTURE_PATH": "{dataDir}/catalog.db"}}}
+        atomic_json(self.config, self.settings)
+        product = self.server.preview.start({})
+        with self.assertRaisesRegex(WorkflowError, "Stop the current"):
+            self.server.preview.start({"profile": "catalog"})
+        self.server.preview.stop()
+        catalog = self.server.preview.start({"profile": "catalog"})
+        self.assertEqual(catalog["profile"], "catalog")
+        self.assertNotEqual(product["recordPath"], catalog["recordPath"])
+        self.assertTrue(self.server.preview.stop()["sourceUnchanged"])
 
     def test_tools_do_not_accept_agent_command_or_inactive_claim(self):
         tools = self.server.handle({"id": 1, "method": "tools/list"})["result"]["tools"]

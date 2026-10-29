@@ -41,6 +41,26 @@ class RalphInstallerTest(unittest.TestCase):
             self.assertIn("mcp__wacha", settings["permissions"]["allow"])
             self.assertIn("wacha", settings["enabledMcpjsonServers"])
 
+    def test_mcp_usage_skill_and_browser_reference_survive_install_and_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "project"
+            target.mkdir()
+            executable, _ = install_local(target)
+            roots = [executable.parents[1]]
+            _, shared = install_global(Path(directory) / "share", Path(directory) / "bin")
+            roots.append(shared)
+            for runtime in roots:
+                browser = runtime / "skills/verify-browser-ac/SKILL.md"
+                linked = browser.parent / "../use-mcp-tools/SKILL.md"
+                self.assertEqual(linked.read_bytes(), (ROOT / ".apm/skills/use-mcp-tools/SKILL.md").read_bytes())
+                # Upgrade stale installed content and retain Project settings.
+                linked.write_text("stale installation")
+            install_local(target)
+            install_global(Path(directory) / "share", Path(directory) / "bin")
+            for runtime in roots:
+                self.assertEqual((runtime / "skills/use-mcp-tools/SKILL.md").read_bytes(),
+                    (ROOT / ".apm/skills/use-mcp-tools/SKILL.md").read_bytes())
+
     def test_local_reinstall_keeps_existing_config(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "sample-project"

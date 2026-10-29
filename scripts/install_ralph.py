@@ -20,9 +20,10 @@ def copy_runtime(runtime_dir: Path) -> Path:
         if source.exists():
             shutil.copytree(source, runtime_dir / entry, dirs_exist_ok=True)
 
-    skill = ROOT / ".apm" / "skills" / "verify-browser-ac"
-    if skill.exists():
-        shutil.copytree(skill, runtime_dir / "skills" / skill.name, dirs_exist_ok=True)
+    for name in ("verify-browser-ac", "use-mcp-tools"):
+        skill = ROOT / ".apm" / "skills" / name
+        if skill.exists():
+            shutil.copytree(skill, runtime_dir / "skills" / skill.name, dirs_exist_ok=True)
 
     for command_name in ("ralph", "ralph-loop"):
         command = runtime_dir / "bin" / command_name
