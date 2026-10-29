@@ -6,7 +6,11 @@
   "retry": {
     "initialSeconds": 300,
     "tokenLimitSeconds": 1800,
-    "maxNoProgressAttempts": 3
+    "maxNoProgressAttempts": 3,
+    "recovery": {
+      "maxAttempts": 3,
+      "maxSeconds": 900
+    }
   },
   "logging": {
     "path": ".ralph/logs/ralph.log",
@@ -42,7 +46,8 @@
     }
   },
   "verification": {
-    "hostCommands": []
+    "hostCommands": [],
+    "browser": null
   },
   "github": {
     "enabled": false,

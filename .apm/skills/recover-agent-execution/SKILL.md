@@ -9,7 +9,7 @@ description: Agentの成果物作成後にGit・PR・実行結果の反映が失
 
 ## 実行状態の照合
 
-- 対象のProject・Role・Task・Runnerを特定する。書き込みを伴う復旧前に対象Runnerを停止し、同じWorktreeを操作するAgentがいないことを確認する。他の実行を一括停止しない。
+- 対象のProject・Principal・Role・Task・Runnerを特定する。書き込みを伴う復旧前に対象Runnerを停止し、同じWorktreeを操作するAgentがいないことを確認する。他の実行を一括停止しない。
 - 停止時刻付近のログ、pause理由、実行記録、結果JSONを確認し、Agent実行・検証・結果解析・commit・push・PR・業務状態の反映のどこで止まったかを判別する。
 - 実行記録からWorktree・branch・HEAD・Claim・PRを特定する。復旧操作前に実行記録・結果JSON・必要な差分をリポジトリ外へ退避する。未追跡の成果物も確認し、認証情報を報告へ出力しない。
 - Worktreeが登録された対象と一致することを確認する。作業差分とindexの差分を別々に調べ、結果JSONの成果物一覧と照合する。リネームは旧パスの削除と新パスの追加の両方を確認する。
@@ -38,20 +38,20 @@ git -C /path/to/worktree ls-files --others --exclude-standard
 
 Project rootの次の記録を確認する。ローカル方式ではGitHub用実行記録がないことがあるため、方式を先に確認する。
 
-- `.ralph/logs/ralph.log`または設定されたログパス
-- `.ralph/pauses/<role>.json`
-- `.ralph/github-state/<role>.json`の`cwd`・`resultPath`・`pendingResult`・`executionError`・`commitSha`・`prNumber`・`finalCommand`
-- `.ralph/github-state/completed/`の成功・掃除記録
+- `.ralph/logs/ralph.YYYY-MM-DD.log`または設定されたログパス
+- `.ralph/runtime.json`の対象Principal・RoleのPauseとProvider・quotaKey別のQuota
+- `.ralph/github-state/<principal>/<role>.json`の`cwd`・`resultPath`・`pendingResult`・`executionError`・`commitSha`・`prNumber`・`finalCommand`
+- `.ralph/github-state/<principal>/completed/`と`retained/`の成功・掃除記録
 - `.ralph/verification/`の検証記録とログ
 
 原因を解消し、再開が承認されていればProject rootで実行する。
 
 ```bash
-ralph resume worker
-ralph run
+ralph resume worker --principal worker-a
+ralph run worker --principal worker-a
 ```
 
-`worker`は対象Roleへ置き換える。`resume`は停止状態の解除であり、反映成功ではない。Runnerがすでに動いている場合は二重に`run`しない。保存済み実行はRunnerに引き継がせ、結果の再処理・Claim再取得・成功receiptの照合を手作業で置き換えない。
+`worker`と`worker-a`は対象Role・Principalへ置き換える。configの既定Principalを使う場合は`--principal`を省略できる。`resume`は停止状態の解除であり、反映成功ではない。同じPrincipal・RoleのRunnerがすでに動いている場合は二重に`run`しない。別Principalの実行を一括停止しない。保存済み実行はRunnerに引き継がせ、結果の再処理・Claim再取得・成功receiptの照合を手作業で置き換えない。
 
 `--discard-execution`はClaim解放と実行の退避・再選択を伴うため、通常の再開には付けない。`reset --hard`・`clean`・Worktreeの強制削除・手動の完了状態書き換えでエラーを隠さない。詳細は利用中のRalphの`ralph/GITHUB.md`と`ralph/lib/github_workflow.py`、CLIの`resume`実装を参照する。
 

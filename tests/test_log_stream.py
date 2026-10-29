@@ -48,50 +48,44 @@ class LogStreamTest(unittest.TestCase):
             record.role = "worker"
             handler.handle(record)
 
-    def test_midnight_in_japan_rotates_without_splitting_lines(self):
-        os.environ["TZ"] = "UTC"
-        time.tzset()
+    def daily(self, at):
+        return self.root / f"ralph.{at.astimezone(JST):%Y-%m-%d}.log"
+
+    def test_midnight_appends_to_distinct_dates_with_two_writers(self):
         before = datetime(2026, 10, 10, 23, 59, 59, tzinfo=JST)
-        handler = self.handler(before)
-        self.emit(handler, before, "日本語 before midnight")
-        self.emit(handler, before + timedelta(seconds=1), "after midnight")
-        old = (self.root / "ralph.log.2026-10-10").read_text()
-        self.assertEqual("[2026-10-10 23:59:59][worker] 日本語 before midnight\n", old)
-        self.assertEqual("[2026-10-11 00:00:00][worker] after midnight\n", self.path.read_text())
+        one, two = self.handler(before), self.handler(before)
+        self.emit(one, before, "A before")
+        self.emit(two, before, "B before")
+        after = before + timedelta(seconds=1)
+        self.emit(one, after, "A after")
+        self.emit(two, after, "B after")
+        self.assertIn("A before", self.daily(before).read_text())
+        self.assertIn("B before", self.daily(before).read_text())
+        self.assertIn("A after", self.daily(after).read_text())
+        self.assertIn("B after", self.daily(after).read_text())
 
-    def test_retains_twenty_backups_and_preserves_unrelated_files(self):
+    def test_retains_twenty_days_and_preserves_unrelated_files(self):
         at = datetime(2026, 1, 1, 12, tzinfo=JST)
-        handler = self.handler(at)
-        (self.root / "verification.json").write_text("evidence")
-        (self.root / "ralph.log.notes").write_text("notes")
+        one, two = self.handler(at), self.handler(at)
+        (self.root / "ralph.notes.log").write_text("notes")
         for day in range(25):
-            self.emit(handler, at + timedelta(days=day), f"day-{day}")
-        backups = sorted(self.root.glob("ralph.log.2026-*"))
-        self.assertEqual(20, len(backups))
-        self.assertEqual("ralph.log.2026-01-05", backups[0].name)
-        self.assertEqual("ralph.log.2026-01-24", backups[-1].name)
-        self.assertIn("day-24", self.path.read_text())
-        self.assertEqual("evidence", (self.root / "verification.json").read_text())
-        self.assertEqual("notes", (self.root / "ralph.log.notes").read_text())
+            self.emit(one, at + timedelta(days=day), f"A-{day}")
+            self.emit(two, at + timedelta(days=day), f"B-{day}")
+        files = sorted(self.root.glob("ralph.2026-*.log"))
+        self.assertEqual(21, len(files))  # current day + 20 prior days
+        self.assertEqual("ralph.2026-01-05.log", files[0].name)
+        self.assertEqual("notes", (self.root / "ralph.notes.log").read_text())
 
-    def test_restart_appends_and_rotates_after_idle_days(self):
+    def test_restart_preserves_legacy_file_and_appends_daily_file(self):
         at = datetime(2026, 1, 1, 12, tzinfo=JST)
-        self.path.write_text("existing history\n")
-        handler = self.handler(at)
-        self.emit(handler, at, "first execution")
-        handler.close()
-        # Simulate the existing log mtime across process restarts.
-        next_day = at + timedelta(days=1)
-        os.utime(self.path, (at.timestamp(), at.timestamp()))
-        with patch("ralph.lib.log_stream.time.time", return_value=next_day.timestamp()):
-            restarted = create_handler(self.path)
-        self.addCleanup(restarted.close)
-        self.emit(restarted, next_day, "restarted")
-        self.assertIn("existing history\n", (self.root / "ralph.log.2026-01-01").read_text())
-        self.emit(restarted, at + timedelta(days=5), "after idle days")
-        self.assertIn("restarted", (self.root / "ralph.log.2026-01-02").read_text())
-        self.assertFalse((self.root / "ralph.log.2026-01-03").exists())
-        self.assertIn("after idle days", self.path.read_text())
+        self.path.write_text("existing legacy history")
+        one = self.handler(at)
+        self.emit(one, at, "first")
+        one.close()
+        two = self.handler(at)
+        self.emit(two, at, "second")
+        self.assertEqual(2, len(self.daily(at).read_text().splitlines()))
+        self.assertEqual("existing legacy history", self.path.read_text())
 
     def test_regular_streams_are_drained_and_keep_separate_console_destinations(self):
         stdout = self.root / "stdout"
@@ -106,15 +100,15 @@ class LogStreamTest(unittest.TestCase):
         os.utime(self.path, (previous, previous))
         result = subprocess.run(self.command(stdout, stderr, role), capture_output=True, text=True, check=True, timeout=10)
         suffix = datetime.fromtimestamp(previous, JST).strftime("%Y-%m-%d")
-        self.assertEqual("legacy history\n", (self.root / f"ralph.log.{suffix}").read_text())
-        lines = self.path.read_text().splitlines()
+        self.assertEqual("legacy history\n", self.path.read_text())
+        lines = self.daily(datetime.now(JST)).read_text().splitlines()
         self.assertEqual(401, len(lines))
         messages = [line.split("][reviewer] ", 1)[1] for line in lines]
         self.assertEqual(sorted([f"out-{i}" for i in range(200)] + [f"err-{i}" for i in range(200)] + ["unterminated"]), sorted(messages))
         self.assertNotIn("err-", result.stdout)
         self.assertNotIn("out-", result.stderr)
         self.assertIn("unterminated", result.stdout)
-        self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
+        self.assertEqual(0o600, self.daily(datetime.now(JST)).stat().st_mode & 0o777)
 
     def command(self, stdout, stderr, role):
         return [sys.executable, str(ROOT / "ralph/lib/log_stream.py"), "--log", str(self.path),
@@ -139,7 +133,7 @@ class LogStreamTest(unittest.TestCase):
         self.assertEqual(0, process.returncode)
         self.assertEqual("", out_text)
         self.assertIn("][manager] last without newline", err_text)
-        self.assertEqual(first + err_text, self.path.read_text())
+        self.assertEqual(first + err_text, self.daily(datetime.now(JST)).read_text())
 
     def test_closed_console_does_not_stop_file_logging(self):
         stdout, stderr, role = (self.root / name for name in ("stdout", "stderr", "role"))
@@ -151,19 +145,37 @@ class LogStreamTest(unittest.TestCase):
         self.assertEqual(0, process.wait(timeout=5))
         self.assertEqual("", process.stderr.read())
         process.stderr.close()
-        self.assertEqual(200, len(self.path.read_text().splitlines()))
+        self.assertEqual(200, len(self.daily(datetime.now(JST)).read_text().splitlines()))
 
     def test_invalid_retention_is_rejected(self):
         for count in (0, -1, True, 1.5, "20"):
             with self.subTest(count=count), self.assertRaisesRegex(ValueError, "positive integer"):
                 create_handler(self.path, count)
 
-    def test_rotation_io_failure_is_not_silently_ignored(self):
+    def test_log_io_failure_is_not_silently_ignored(self):
         at = datetime(2026, 1, 1, 23, 59, tzinfo=JST)
         handler = self.handler(at)
-        with patch.object(handler, "doRollover", side_effect=OSError("rotation failed")):
-            with self.assertRaisesRegex(OSError, "rotation failed"):
-                self.emit(handler, at + timedelta(minutes=2), "must not vanish silently")
+        with patch("ralph.lib.log_stream.os.open", side_effect=OSError("append failed")):
+            with self.assertRaisesRegex(OSError, "append failed"):
+                self.emit(handler, at, "must not vanish silently")
+
+    def test_multiple_processes_append_without_renaming_or_losing_records(self):
+        script = """import logging,sys
+from pathlib import Path
+from ralph.lib.log_stream import create_handler
+h=create_handler(Path(sys.argv[1]))
+for i in range(200):
+ r=logging.LogRecord('ralph',20,'',0,sys.argv[2]+':'+str(i),(),None)
+ r.role='worker:'+sys.argv[2]
+ h.handle(r)
+"""
+        processes = [subprocess.Popen([sys.executable, "-c", script, str(self.path), identity], cwd=ROOT)
+                     for identity in ("a", "b", "c")]
+        for process in processes:
+            self.assertEqual(0, process.wait(timeout=10))
+        lines = self.daily(datetime.now(JST)).read_text().splitlines()
+        self.assertEqual(600, len(lines))
+        self.assertEqual(600, len(set(lines)))
 
 
 if __name__ == "__main__":

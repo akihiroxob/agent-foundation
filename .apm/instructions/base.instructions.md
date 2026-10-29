@@ -13,6 +13,12 @@ applyTo: "**/*"
 - シークレット、`.env`、秘密鍵、認証情報を出力に含めない。
 - 繰り返し作業を自動化できる場合は、再利用可能な Skill またはスクリプトを提案・作成する。
 
+## MCPの利用
+
+- MCP操作では`use-mcp-tools` Skillに従い、対象サーバーの現在のTool契約とProjectのPolicy・主体・scopeを照合する。
+- 共通Instruction/Skillへ製品固有のTool名の許可一覧を固定しない。Toolの公開・発見と、操作権限・今回の許可を混同しない。
+- Projectが環境・主体・対象scope・目的で許可した公開操作は、その範囲で選択して進める。明示的な個別許可リストやサーバー認可は迂回しない。
+
 ## 検証プロセスの所有権
 
 - Agentが停止してよいのは、自身が検証のために起動したプロセスだけとする。人、他のAgent、外部のプロセス管理機構が起動したサービスは停止・再起動しない。
@@ -25,6 +31,9 @@ applyTo: "**/*"
 - コード、設定、CLI、公開 API、利用者向け動作を変更した後は、関連ドキュメントへの影響を確認する。
 - Worker はドキュメント更新が必要なら実装と同じ Task 内で更新し、不要ならその判断理由を作業報告へ残す。
 - Reviewer は実装、設定例、README、API 文書、ADR、Knowledge の整合性を確認し、不一致を見逃したまま承認しない。
+- README・利用ガイド・仕様書・API 文書・Knowledge など現在情報の正本には、現在有効な仕様・設定・制約・操作方法を記載する。変更時は説明を更新し、廃止した仕様、変更前後の比較、導入時の説明、作業履歴を追記して残さない。
+- 設計判断とその背景・経緯は ADR、移行元・移行先と移行操作は専用の移行手順書、変更記録は Git 履歴や CHANGELOG、未確定案は計画・提案文書へ分離する。現行文書からはリンクで参照し、本文を二重管理しない。
+- Reviewer は現行文書に過去情報・移行手順・未確定案が混入していないことも確認する。現在有効な互換動作や制約は現行仕様として説明し、履歴の説明と混同しない。
 - 明確な発火条件と反復可能な手順は Skill、現在有効な原則・仕様・制約は Knowledge、プロジェクト固有の重要な設計判断と経緯は利用先リポジトリの ADR へ残す。
 - 共通 Skill・Knowledge への昇格は通常のドキュメント修正と分け、Worker が候補を提起し、Reviewer が再利用性と根拠を確認する。
 
@@ -43,3 +52,9 @@ applyTo: "**/*"
 - request 処理、application use case、domain logic、infrastructure adapter を分離する。Controller は request の検証・変換を担い、Use Case は業務操作を統合し、Repository と外部 client は interface の背後に置く。
 - Bounded Context ごとに model と rule の所有権を保つ。database entity や内部 domain model を Context 間で共有せず、明示的な contract を介して連携する。
 - これらの境界を保つ最小限の設計を選ぶ。具体的なドメイン上または保守上の必要性なく、layer、interface、aggregate、pattern を導入しない。
+
+## レビュー・受入中の検証準備
+
+- Reviewer/Managerは検証対象の本体、AC、期待結果、業務認可を固定する。準備の不足は、Projectが明示した専用領域の準備コード・fixture・検証用設定を修正して解消できる。
+- 準備側の変更理由・取得元の版・差分・再検証結果を記録する。期待値を緩めたり製品不具合を準備側で隠して成功させない。本体修正はWorkerへ戻す。
+- Ralph Contextに`verificationPreparation`があれば、その専用コピーと列挙したファイルだけを使う。実行対象の本体Worktree・固定Project checkout・Ralphの実行記録やホスト許可配列を変更しない。

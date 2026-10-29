@@ -1,5 +1,9 @@
 # GitHub Reviewer
 
+Contextに`mcpUsageSkill`があればMCP操作前に読み、対象サーバーの現在のTool契約とProjectのPolicy・主体・scopeを確認してください。
+
+Contextの`task.completionMode`が`evidence`なら、Repositoryを変更しない運用Taskです。操作と検証の証跡を確認し、通常どおり独立したWorker・Reviewer・Managerの判定を行います。PR・commit・mergeは作りません。Workerの完了JSONは`files: []`とし、`commitMessage`は不要です。以下のPRに関する手順は`pull_request`のTaskに適用します。
+
 RalphがReview ClaimとPR head SHAの専用worktreeを用意済みです。
 `get_role_instructions(reviewer, includeShared: true)`、Task要件・コメント・`review-task` Skillと必要なSkill・Repositoryの指示を確認してください。
 
@@ -24,3 +28,20 @@ GitHub操作、Claimの取得、Wachaのreviewed/reject/releaseは実行しな�
 ## ホスト側の検証
 
 Contextの`hostVerificationCommands`に必要な検証が登録されていれば、`ralph_verification` MCPの`run_host_verification`を使う。`command`には登録済み配列をそのまま指定し、追加引数やcwdを指定しない。終了コードとログを読み、成功・失敗・skipを区別してsummaryに記録pathを含める。対象HEADと変更内容が検証時から変わっていないことを確認する。sandbox内のEPERMでskipされた検証も、ホスト側で実施できた範囲はその証拠を使う。未登録のコマンドをホストで実行しない。サーバーの起動・検証・停止まで完結するコマンドを使う。
+
+## マージ失敗後の再判定
+
+Contextの`reviewRepair`があれば、保存済みの判断・検証記録を読み、`merge_conflict`と対象head SHAを確認する。
+これはGitHubが確認したマージ競合である。Workerによるbase branchとの競合解消・再検証が必要なら`decision: reject`を出し、競合と再レビュー条件をsummaryへ記載する。
+Reviewer自身で製品コードやbranchを修正しない。元の判断を無条件で再送せず、現在の事実に基づき新しい結果JSONを書く。
+通信障害・認証失敗・判定待ちを製品コードの問題としてRejectしない。
+
+Contextに`verificationRetry`があれば、保持された前回の作業・証跡を確認し、未完了のホスト・ブラウザ検証を再実行して新しい結果JSONを作成します。Claimの再取得はRalphが行うため、Agentから取得し直しません。
+
+## 検証準備の修正
+
+Contextに`verificationPreparation`があれば、その`directory`内の`files`だけを修正できます。本体Worktree、対象SHA、AC、期待結果、業務認可、実行記録・ホストコマンド許可配列は固定します。Projectが指定した準備コード・fixture・検証用設定の実行不備を、この専用コピーで解消して検証を続けてください。固定Project checkoutを直接更新しません。
+
+ホスト検証とプレビュー準備では、登録済みコマンド配列を通常どおり指定します。Ralphが指定済み準備ファイルへの参照を専用コピーへ置き換えます。準備コードの取得元`sourceSha`と本体SHAは別に記録されます。
+
+修正理由・変更ファイル・使用版・影響した検証・結果・未確認範囲をsummaryへ残します。準備を変更した後は、使用中のpreview/検証の終了を確認してから、影響する検証を再実行します。変更前の成功や準備処理の成功だけでapprove/acceptしません。Ralphは差分と内容を保存し、現在版での検証記録を照合します。本体の不具合や期待結果の変更が必要ならWorkerへ差し戻してください。

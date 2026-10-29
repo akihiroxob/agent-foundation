@@ -5,7 +5,13 @@ import argparse
 import json
 import os
 import subprocess
+import signal
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from runtime_state import (acquire_roles, execution_path, migrate, operate,
+                           project_root, read_object, component)
 
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = RUNTIME_ROOT / "examples" / "config.json"
@@ -146,52 +152,95 @@ def run_command(args: argparse.Namespace) -> int:
         print("Run `ralph init` in the project first.")
         return 2
 
-    # One host runner owns PR mutations in a Project. Separate Projects can run concurrently.
-    lock = root / ".ralph" / "runner.pid"
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(2):
-        try:
-            descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            with os.fdopen(descriptor, "w") as output:
-                output.write(str(os.getpid()))
-            break
-        except FileExistsError:
-            try:
-                pid = int(lock.read_text())
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                lock.unlink(missing_ok=True)
-                continue
-            except (ValueError, PermissionError):
-                print("Ralph lock cannot be verified; inspect .ralph/runner.pid")
-                return 2
-            print("Ralph is already running for this Project")
-            return 2
-    else:
+    config = read_object(config_path)
+    root = project_root(config_path, config)
+    handles = []
+    process = None
+    previous_handlers = {}
+    try:
+        identities = {role: args.principal if args.principal is not None else config["roles"][role]["agentName"]
+                      for role in dict.fromkeys(args.roles)}
+        for principal in identities.values():
+            component(principal)
+        migrate(root, config)
+        lock_identities = dict(identities)
+        if not config.get("github", {}).get("enabled", False):
+            # Legacy agents operate directly in the shared checkout, not isolated worktrees.
+            lock_identities["local-checkout"] = "legacy"
+        handles = acquire_roles(root, lock_identities)
+        environment = os.environ.copy()
+        environment["RALPH_ROLE_PRINCIPALS"] = json.dumps(identities)
+        environment["RALPH_RUNNER_MANAGED"] = "1"
+        process = subprocess.Popen([str(LOOP_COMMAND), "--config", str(config_path), *args.roles],
+                                   env=environment, pass_fds=tuple(handles))
+        def forward(signum, frame):
+            if process.poll() is None:
+                process.send_signal(signum)
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, forward)
+        return process.wait()
+    except (ValueError, KeyError, OSError) as error:
+        print(str(error), file=sys.stderr)
         return 2
-    environment = os.environ.copy()
-    os.execve(
-        LOOP_COMMAND,
-        [str(LOOP_COMMAND), "--config", str(config_path), args.role],
-        environment,
-    )
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait()
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        for descriptor in handles:
+            os.close(descriptor)
 
 
 def resume_command(args: argparse.Namespace) -> int:
     root = find_project_root(args.project_root)
+    config_path = args.config.expanduser().resolve() if args.config else root / ".ralph/config.json"
+    config = read_object(config_path)
+    root = project_root(config_path, config)
     roles = ("worker", "reviewer", "manager") if args.role == "all" else (args.role,)
+    migrate(root, config)
     for role in roles:
+        principal = args.principal if args.principal is not None else config["roles"][role]["agentName"]
+        component(principal)
         if args.discard_execution:
-            path = root / ".ralph" / "github-state" / f"{role}.json"
-            if path.exists():
-                config_path = args.config.expanduser().resolve() if args.config else root / ".ralph/config.json"
-                helper = RUNTIME_ROOT / "lib" / "github_workflow.py"
-                result = subprocess.run(["python3", str(helper), "abandon", "--config", str(config_path), "--role", role], check=False)
-                if result.returncode:
-                    return result.returncode
-        (root / ".ralph" / "pauses" / f"{role}.json").unlink(missing_ok=True)
-        print(f"resumed {role}; retained Claim/worktree and pending decisions")
+            # Destructive recovery must not race a live runner of this identity.
+            handles = acquire_roles(root, {role: principal})
+            try:
+                if execution_path(root, principal, role).exists():
+                    helper = RUNTIME_ROOT / "lib" / "github_workflow.py"
+                    environment = os.environ.copy()
+                    environment["RALPH_ROLE_PRINCIPALS"] = json.dumps({role: principal})
+                    result = subprocess.run(["python3", str(helper), "abandon", "--config", str(config_path), "--role", role],
+                                            env=environment, check=False)
+                    if result.returncode:
+                        return result.returncode
+            finally:
+                for descriptor in handles:
+                    os.close(descriptor)
+        operate(root, principal, role, "resume")
+        print(f"resumed {role} principal={principal}; retained Claim/worktree and pending decisions; deferred Tasks eligible for restoration")
     return 0
+
+
+def status_command(args: argparse.Namespace) -> int:
+    from execution_status import status_lines
+    root = find_project_root(args.project_root)
+    config_path = args.config.expanduser().resolve() if args.config else root / ".ralph/config.json"
+    config = read_object(config_path)
+    root = project_root(config_path, config)
+    if args.principal:
+        component(args.principal)
+    for line in status_lines(root, config, args.principal):
+        print(line)
+    return 0
+
+
+def parse_role(value: str) -> str:
+    if value not in ("worker", "reviewer", "manager"):
+        raise argparse.ArgumentTypeError(
+            f"invalid choice: {value!r} (choose from worker, reviewer, manager)"
+        )
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -205,15 +254,24 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--force", action="store_true")
     init_parser.set_defaults(handler=init_command)
 
-    run_parser = subparsers.add_parser("run", help="Run the priority loop or one role loop.")
-    run_parser.add_argument("role", nargs="?", choices=("auto", "worker", "reviewer", "manager"), default="auto")
+    run_parser = subparsers.add_parser("run", help="Run selected roles in priority order (default: all roles).")
+    run_parser.add_argument("roles", nargs="*", type=parse_role, metavar="ROLE",
+                            default=["manager", "reviewer", "worker"],
+                            help="Roles to run; multiple roles use Manager → Reviewer → Worker priority.")
     run_parser.add_argument("--project-root", type=Path)
     run_parser.add_argument("--config", type=Path)
+    run_parser.add_argument("--principal", "-p", help="Override the Principal for every selected role.")
     run_parser.set_defaults(handler=run_command)
+    status = subparsers.add_parser("status", help="Show Runner, Agent and deferred Task state without remote operations")
+    status.add_argument("--project-root", type=Path)
+    status.add_argument("--config", type=Path)
+    status.add_argument("--principal", "-p")
+    status.set_defaults(handler=status_command)
     resume = subparsers.add_parser("resume", help="Resume a role after fixing its blocker")
     resume.add_argument("role", choices=["all", "worker", "reviewer", "manager"])
     resume.add_argument("--project-root", type=Path)
     resume.add_argument("--config", type=Path)
+    resume.add_argument("--principal", "-p", help="Principal whose pause should be cleared.")
     resume.add_argument("--discard-execution", action="store_true", help="Release Claim and archive pending execution; keep worktrees")
     resume.set_defaults(handler=resume_command)
 
@@ -222,7 +280,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    return args.handler(args)
+    try:
+        return args.handler(args)
+    except (ValueError, KeyError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
