@@ -1248,6 +1248,51 @@ class GitHubWorkflowTest(unittest.TestCase):
         with self.assertRaisesRegex(WorkflowError, "tracked or redirected"):
             worker.cleanup_worktree(execution)
 
+    def test_completed_local_branch_is_removed_without_remote_deletion(self):
+        worker, context = self.worker()
+        branch = "ralph/local/" + worker.state["task"]["id"] + "/" + worker.state["claimId"][:8]
+        self.assertEqual("", run("git", "branch", "--list", branch, cwd=self.repo))
+        self.assertTrue(run("git", "for-each-ref", "--format=%(refname)", "refs/remotes/origin/", cwd=self.repo))
+        record = json.loads(next((worker.state_path.parent / "completed").glob("worker-*.json")).read_text())
+        self.assertEqual("removed", record["branchCleanup"])
+        self.assertEqual("removed", worker.cleanup_local_branch(record))
+
+    def test_historical_branch_cleanup_retains_changed_and_checked_out_refs(self):
+        worker, context = self.worker()
+        record = json.loads(next((worker.state_path.parent / "completed").glob("worker-*.json")).read_text())
+        branch = "ralph/local/" + record["task"]["id"] + "/" + record["claimId"][:8]
+        run("git", "branch", branch, record["commitSha"], cwd=self.repo)
+        directory = self.base / "other-worktree"
+        run("git", "worktree", "add", str(directory), branch, cwd=self.repo)
+        with self.assertRaisesRegex(WorkflowError, "used by a Worktree"):
+            worker.cleanup_local_branch(record)
+        run("git", "worktree", "remove", str(directory), cwd=self.repo)
+        original = run("git", "rev-parse", "main", cwd=self.repo)
+        run("git", "update-ref", "refs/heads/" + branch, original, cwd=self.repo)
+        with self.assertRaisesRegex(WorkflowError, "unexpected commit"):
+            worker.cleanup_local_branch(record)
+        run("git", "update-ref", "refs/heads/" + branch, record["commitSha"], cwd=self.repo)
+        record.pop("branchCleanup", None)
+        archive = next((worker.state_path.parent / "completed").glob("worker-*.json"))
+        atomic_json(archive, record)
+        worker.retry_completed_cleanup()
+        self.assertEqual("", run("git", "branch", "--list", branch, cwd=self.repo))
+
+    def test_branch_cleanup_keeps_unpushed_commit_and_released_execution(self):
+        worker, context = self.worker()
+        record = json.loads(next((worker.state_path.parent / "completed").glob("worker-*.json")).read_text())
+        branch = "ralph/local/" + record["task"]["id"] + "/" + record["claimId"][:8]
+        run("git", "branch", branch, record["commitSha"], cwd=self.repo)
+        directory = self.base / "unpublished"
+        run("git", "worktree", "add", str(directory), branch, cwd=self.repo)
+        run("git", "commit", "--allow-empty", "-m", "Unpublished", cwd=directory)
+        unpublished = run("git", "rev-parse", "HEAD", cwd=directory)
+        run("git", "worktree", "remove", str(directory), cwd=self.repo)
+        with self.assertRaisesRegex(WorkflowError, "no remote tracking reference"):
+            worker.cleanup_local_branch({**record, "commitSha": unpublished})
+        self.assertEqual("retained", worker.cleanup_local_branch({**record, "completed": False, "releasedClaim": True}))
+        self.assertEqual(unpublished, run("git", "rev-parse", branch, cwd=self.repo))
+
     def test_corrupt_completed_record_does_not_block_other_cleanup(self):
         worker = FakeWorkflow(self.config, "worker", self.remote)
         path = worker.state_path.parent / "completed/worker-corrupt.json"

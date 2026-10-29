@@ -129,13 +129,13 @@ ralph resume reviewer --principal reviewer-a --discard-execution
 
 ## Worktreeの掃除
 
-WorkerのPR提出、Reviewerの承認・差し戻し、Managerの受入・差し戻しについて、最終Wacha操作が成功した後に、その実行のworktreeを自動削除する。branchとPRは保持し、差し戻し後はPRの最新headからworktreeを再作成する。
+WorkerのPR提出、Reviewerの承認・差し戻し、Managerの受入・差し戻しについて、最終Wacha操作が成功した後に、その実行のworktreeを自動削除する。PRとリモートbranchは保持し、差し戻し後はPRの最新headからworktreeを再作成する。Workerの完了済みローカル`ralph/local/<taskId>/<worktreeClaimId先頭8文字>`は、Worktree削除済み・先端SHAが完了記録と一致・他Worktreeで未使用・commitがoriginの追跡refから到達可能である場合に削除する。既存の完了記録も監視周期で照合する。先端SHAを比較して削除し、未知のcommitや未送信の成果物は保持する。
 
 結果・Claim・PR・SHA・最終操作は`.ralph/github-state/<principal>/completed/<role>-<claimId>.json`へ退避する。通信途絶後は同じrequestIdで最終操作の成功を確認してから掃除する。掃除失敗はTaskの成功を取り消さず、Roleの監視周期ごとに、Taskの有無・Pauseの有無にかかわらず、そのPrincipal・Roleの完了済みWorktreeの掃除だけを再試行する。
 
 想定した登録済みworktree・SHAと一致し、追跡済み変更や未追跡ファイルがない場合だけ`git worktree remove`を実行する。Ralph生成の`.ralph/mcp.json`・`.ralph-result.json`は結果退避後に削除する。`.ralph/tmp/node-compile-cache/`は生成キャッシュとして削除する。追跡済みファイルやsymlinkがある場合は削除しない。その他の未知の未追跡ファイルは自動削除しない。Gitで除外した依存関係やbuild成果物もworktreeと共に削除されるため、残す必要がある成果物はworktree外へ保存する。
 
-実行中、CI待ち、通信失敗、未保存変更・未知のファイル・追加commit・lockがあるWorktreeは保持する。blockedまたは明示的な破棄でClaim解放が確認できた実行は、根拠・結果・実行記録を退避した後、変更のないWorktreeを削除する。削除失敗の理由はログと完了記録に残る。自動的な`reset --hard`・`clean`・強制削除・branch削除は行わない。完了記録と対象Claimに照合できないWorktreeは自動削除しない。
+実行中、CI待ち、通信失敗、未保存変更・未知のファイル・追加commit・lockがあるWorktreeは保持する。blockedまたは明示的な破棄でClaim解放が確認できた実行は、根拠・結果・実行記録を退避した後、変更のないWorktreeを削除する。削除失敗の理由はログと完了記録に残る。自動的な`reset --hard`・`clean`・強制Worktree削除は行わない。完了記録と対象Claimに照合できないWorktreeは自動削除しない。
 
 コミット対象のパスはWorktree内の正規の相対パスに限定する。`.git`自体・Ralphの実行用ファイル・Agent設定は保護し、`.gitignore`や`.github/`は通常の成果物として扱う。
 

@@ -605,14 +605,49 @@ class Workflow(OperationRecovery):
         run("git", "worktree", "remove", str(directory), cwd=self.root)
         return "removed"
 
+    def cleanup_local_branch(self, execution: dict) -> str:
+        """Delete only the completed Worker's exact, remotely preserved local ref."""
+        if self.role != "worker":
+            return "not_applicable"
+        if not execution.get("completed") or execution.get("finalCommand", {}).get("name") != "complete_task":
+            return "retained"
+        if execution.get("cleanup") != "removed":
+            return "retained"
+        claim = execution.get("worktreeClaimId", execution["claimId"])
+        branch = f"ralph/local/{execution['task']['id']}/{claim[:8]}"
+        ref = "refs/heads/" + branch
+        run("git", "check-ref-format", ref, cwd=self.root)
+        found = run("git", "for-each-ref", "--format=%(objectname)", ref, cwd=self.root).splitlines()
+        if not found:
+            return "removed"
+        expected = execution.get("commitSha") or execution.get("initialHeadSha")
+        if found != [expected]:
+            raise WorkflowError("Local branch contains an unexpected commit: " + branch)
+        registered = run("git", "worktree", "list", "--porcelain", "-z", cwd=self.root).split("\0")
+        if "branch " + ref in registered:
+            raise WorkflowError("Local branch is used by a Worktree: " + branch)
+        if not run("git", "for-each-ref", "--contains", expected, "--format=%(refname)", "refs/remotes/origin/", cwd=self.root):
+            raise WorkflowError("Local branch commit has no remote tracking reference; retained: " + branch)
+        # Compare-and-delete prevents removing a branch advanced after the checks.
+        run("git", "update-ref", "-d", ref, expected, cwd=self.root)
+        return "removed"
+
     def cleanup_record(self, path: Path, execution: dict) -> None:
         try:
-            execution["cleanup"] = self.cleanup_worktree(execution)
+            if execution.get("cleanup") != "removed":
+                execution["cleanup"] = self.cleanup_worktree(execution)
             execution.pop("cleanupError", None)
         except (WorkflowError, OSError) as error:
             execution["cleanup"] = "retained"
             execution["cleanupError"] = str(error)
             print(f"{self.role}: completed worktree retained; {error}", file=sys.stderr)
+        try:
+            execution["branchCleanup"] = self.cleanup_local_branch(execution)
+            execution.pop("branchCleanupError", None)
+        except (WorkflowError, OSError) as error:
+            execution["branchCleanup"] = "retained"
+            execution["branchCleanupError"] = str(error)
+            print(f"{self.role}: local branch retained: {error}", file=sys.stderr)
         atomic_json(path, execution)
 
     def retry_completed_cleanup(self) -> None:
@@ -624,7 +659,7 @@ class Workflow(OperationRecovery):
             except (ValueError, OSError) as error:
                 print(f"{self.role}: cannot read cleanup record {path.name} ({type(error).__name__}); retained", file=sys.stderr)
                 continue
-            if execution.get("completed") and execution.get("cleanup") != "removed":
+            if execution.get("completed") and (execution.get("cleanup") != "removed" or execution.get("branchCleanup") not in {"removed", "not_applicable"}):
                 self.cleanup_record(path, execution)
 
     def complete_execution(self) -> None:
