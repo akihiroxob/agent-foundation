@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import queue
+import signal
 import sys
 import threading
 import time
@@ -121,6 +122,9 @@ def collect(handler: DailyLogHandler, stdout_pipe: Path, stderr_pipe: Path, role
 
 
 def main() -> None:
+    # Drain pipe EOF during group shutdown; the supervisor bounds this wait.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     parser = argparse.ArgumentParser()
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument("--stdout-pipe", type=Path, required=True)

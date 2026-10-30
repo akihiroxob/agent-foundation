@@ -188,6 +188,7 @@ setup_logging
 rendered_prompt=""
 cleanup() {
   local exit_status=$?
+  if [[ -n "${SLEEP_PID:-}" ]]; then kill "$SLEEP_PID" 2>/dev/null || true; wait "$SLEEP_PID" 2>/dev/null || true; fi
   if [[ -n "${PROVIDER_PID:-}" ]]; then kill "$PROVIDER_PID" 2>/dev/null || true; wait "$PROVIDER_PID" 2>/dev/null || true; fi
   if [[ -n "${heartbeat_pid:-}" ]]; then kill "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; fi
   cleanup_logging
@@ -199,6 +200,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Waiting on a background child makes Bash dispatch INT/TERM traps immediately.
+interruptible_sleep() {
+  sleep "$1" &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID"
+  SLEEP_PID=""
+}
 
 rendered_prompt="$(mktemp "${TMPDIR:-/tmp}/ralph-prompt.XXXXXX")"
 backend_requirements
@@ -415,7 +424,7 @@ wait_before_retry() {
   local delay="${2:-$RETRY_INITIAL_SECONDS}"
   set_activity retry_wait "" "$reason"
   ralph_log_error '%s %d秒後に再試行します。\n' "$reason" "$delay"
-  sleep "$delay"
+  interruptible_sleep "$delay"
 }
 
 last_idle_log_epoch=0
@@ -444,7 +453,7 @@ while true; do
       pending="$(backend_pending_count "$role" "$summary")"
     fi
   elif role_paused "$role" || (( $(date +%s) < $(quota_retry_at "$role") )); then
-    sleep "$POLL_INTERVAL_SECONDS"
+    interruptible_sleep "$POLL_INTERVAL_SECONDS"
     continue
   elif ! summary="$(task_summary "$role")"; then
     wait_before_retry 'Wachaの状態取得に失敗しました。'
@@ -476,7 +485,7 @@ while true; do
     fi
     set_activity waiting
     last_idle_summary="$normalized_summary"
-    sleep "$POLL_INTERVAL_SECONDS"
+    interruptible_sleep "$POLL_INTERVAL_SECONDS"
     continue
   fi
 
@@ -499,7 +508,7 @@ while true; do
     if context="$(github_command prepare)"; then
       if [[ "$(jq -r '.idle // false' <<<"$context")" == true ]]; then
         ralph_log '選択処理後の実行対象なし。Agentは起動しません。\n'
-        if [[ "$mode" == auto ]]; then auto_set_role_retry_at "$role" "$(($(date +%s) + POLL_INTERVAL_SECONDS))"; else sleep "$POLL_INTERVAL_SECONDS"; fi
+        if [[ "$mode" == auto ]]; then auto_set_role_retry_at "$role" "$(($(date +%s) + POLL_INTERVAL_SECONDS))"; else interruptible_sleep "$POLL_INTERVAL_SECONDS"; fi
         continue
       fi
       active_task_id="$(jq -r '.task.id // ""' <<<"$context")"

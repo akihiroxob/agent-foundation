@@ -215,6 +215,8 @@ Agent ProviderのToken枯渇、利用量制限、その他の異常終了や、W
 
 `initialSeconds`は通常エラー、`tokenLimitSeconds`はToken上限メッセージからReset時刻を取得できなかった場合のフォールバック待機時間です。Ralphプロセス自体が終了・強制停止された場合の自動再起動は行わないため、常駐運転では必要に応じて`launchd`や`systemd`などのプロセス管理を併用してください。
 
+`Ctrl+C`または`SIGTERM`でRunnerを停止する。Runner専用のプロセスグループへ停止を通知し、最大5秒の終了猶予後は残る子プロセスを終了する。二度目の割り込みは猶予を打ち切る。終了時はRoleロックを解放し、Claim・Worktree・判断結果・復旧記録を保持する。停止はTaskの破棄・受入・差し戻しを意味しない。ログは終了中もpipeのEOFまで回収し、回収待ちにも同じ終了上限を適用する。
+
 現在の状態はProject内で`ralph status`を実行して確認します。`--principal <principal>`で対象を絞れます。Runnerの停止、Agent実行中、結果確認・反映中、再試行待ち、保留Taskを区別し、Task名・実行記録のパス・保留理由を表示します。ローカル記録を読むだけで、MCPへの接続や状態変更は行いません。
 
 GitHub方式では、Agentが`blocked`と判定しClaimの解放が確認できた保留Taskについて、同じProjectの別Taskに保留時点より新しいAccepted更新があれば、所有PrincipalのAgentを自動再起動して前提を再評価します。別Taskの受入は前提解消の保証ではなく、Agentが現在の要件と保留理由を照合します。再び保留した場合は、その保留より新しいAccepted更新まで再起動しません。通信断で操作の成否が不明な保留・復旧診断中の保留・他Principalの保留は自動再開しません。外部設定や検証データだけを変更した場合は、`ralph resume <role> --principal <principal>`で再評価を指示します。
