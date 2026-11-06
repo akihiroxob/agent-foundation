@@ -1,4 +1,4 @@
-"""Host-owned preview lifecycle for exploratory Manager browser verification."""
+"""Host-owned preview lifecycle for exploratory Role browser verification."""
 from __future__ import annotations
 
 import json
@@ -71,7 +71,7 @@ def playwright_config(root: Path) -> dict:
     if not isinstance(args, list) or any(not isinstance(s, str) or "\0" in s for s in args):
         raise WorkflowError("Project playwright MCP args must be an argument array")
     if "--isolated" not in args or "--headless" not in args or any(s.startswith(("--cdp-endpoint", "--extension", "--user-data-dir", "--shared-browser-context")) for s in args):
-        raise WorkflowError("Manager playwright MCP requires isolated, headless sessions without a shared browser")
+        raise WorkflowError("Playwright MCP requires isolated, headless sessions without a shared browser")
     env = value.get("env", {})
     if not isinstance(env, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()):
         raise WorkflowError("Project playwright MCP env must contain string values")
@@ -113,8 +113,8 @@ class PreviewSession:
         with self.lock:
             workflow = self.owner.active_workflow()
             settings = browser_config(workflow.config, profile)
-            if self.owner.role != "manager" or settings is None:
-                raise WorkflowError("Browser preview is only enabled for Manager with verification.browser")
+            if self.owner.role not in {"worker", "reviewer", "manager"} or settings is None:
+                raise WorkflowError("Browser preview is only enabled for Worker/Reviewer/Manager with verification.browser")
             if self.process is not None:
                 if self.process.poll() is None:
                     if self.record.get("profile") != profile:

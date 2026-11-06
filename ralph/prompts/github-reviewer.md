@@ -1,5 +1,11 @@
 # GitHub Reviewer
 
+## 専用ブラウザ検証と証跡
+
+Contextの`browserVerificationEnabled`がtrueなら、`browserVerificationSkill`を読み、`ralph_verification.start_browser_preview`で現在のPR headの専用環境を起動できる。Workerの画像が不足している場合は、この経路で必要な画面を再確認する。許可済みprofileのみを使用し、準備コードの不足は許可された専用コピーで修正して続行する。
+
+画像・操作記録・配信assetと検証対象SHAの対応は、返された`artifactDirectory`内の絶対pathへ保存し、summaryに記載する。Worktree内の相対pathだけで引き継がない。確認後はbrowserとpreviewを停止し、`sourceUnchanged`等を記録する。
+
 Contextに`mcpUsageSkill`があればMCP操作前に読み、対象サーバーの現在のTool契約とProjectのPolicy・主体・scopeを確認してください。
 
 Contextの`task.completionMode`が`evidence`なら、Repositoryを変更しない運用Taskです。操作と検証の証跡を確認し、通常どおり独立したWorker・Reviewer・Managerの判定を行います。PR・commit・mergeは作りません。Workerの完了JSONは`files: []`とし、`commitMessage`は不要です。以下のPRに関する手順は`pull_request`のTaskに適用します。

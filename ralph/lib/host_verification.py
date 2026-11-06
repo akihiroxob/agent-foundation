@@ -176,8 +176,8 @@ class VerificationServer:
                 from .browser_preview import browser_config
             else:
                 from browser_preview import browser_config
-            if self.role == "manager" and browser_config(Workflow(self.config, self.role, self.principal).config):
-                for name, description in (("start_browser_preview", "Start the Project-approved preview server on the host for this Manager worktree. Returns URL, SHA and artifact directory. No command overrides."), ("stop_browser_preview", "Stop this preview and record whether its source/HEAD changed. Does not accept a PID.")):
+            if self.role in {"worker", "reviewer", "manager"} and browser_config(Workflow(self.config, self.role, self.principal).config):
+                for name, description in (("start_browser_preview", "Start the Project-approved preview server on the host for this Role worktree. Returns URL, SHA and artifact directory. No command overrides."), ("stop_browser_preview", "Stop this preview and record whether its source/HEAD changed. Does not accept a PID.")):
                     properties = {}
                     if name == "start_browser_preview":
                         profiles = Workflow(self.config, self.role, self.principal).config.get("verification", {}).get("browser", {}).get("profiles", {})
@@ -193,7 +193,7 @@ class VerificationServer:
                     result = self.execute(arguments)
                 elif name == "start_browser_preview":
                     result = self.preview.start(arguments)
-                elif name == "stop_browser_preview" and self.role == "manager":
+                elif name == "stop_browser_preview" and self.role in {"worker", "reviewer", "manager"}:
                     if arguments != {}:
                         raise WorkflowError("stop_browser_preview takes no arguments")
                     result = self.preview.stop()

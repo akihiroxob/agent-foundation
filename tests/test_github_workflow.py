@@ -164,6 +164,38 @@ class GitHubWorkflowTest(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
+    def test_unaccepted_dependencies_prevent_claim_and_worktree_then_acceptance_allows_work(self):
+        config = json.loads(self.config.read_text())
+        config["taskDependencies"] = {"task-1": ["first", "second"]}
+        atomic_json(self.config, config)
+        self.remote["acceptedTasks"] = [{"id": "first", "status": "accepted"}]
+        workflow = FakeWorkflow(self.config, "worker", self.remote)
+        self.assertTrue(workflow.prepare()["idle"])
+        self.assertEqual(self.remote["claims"], 0)
+        self.assertFalse(workflow.state_path.exists())
+        self.remote["acceptedTasks"].append({"id": "second", "status": "accepted"})
+        self.assertIn("cwd", workflow.prepare())
+        self.assertEqual(self.remote["claims"], 1)
+
+    def test_explicit_resume_does_not_restore_dependency_waiting_work(self):
+        workflow = FakeWorkflow(self.config, "worker", self.remote)
+        context = workflow.prepare()
+        atomic_json(Path(context["resultPath"]), {"decision": "blocked", "summary": "Wait for prerequisites"})
+        with self.assertRaises(RecoveryDeferred):
+            workflow.finish()
+        config = json.loads(self.config.read_text())
+        config["taskDependencies"] = {"task-1": ["first", "second"]}
+        atomic_json(self.config, config)
+        operate(self.repo, "worker", "worker", "resume")
+        self.remote["acceptedTasks"] = [{"id": "first", "status": "accepted", "updatedAt": 9999999999999}]
+        resumed = FakeWorkflow(self.config, "worker", self.remote)
+        self.assertTrue(resumed.prepare()["idle"])
+        self.assertEqual(self.remote["claims"], 1)
+        self.assertEqual(len(list(resumed.deferred_records())), 1)
+        self.remote["acceptedTasks"].append({"id": "second", "status": "accepted", "updatedAt": 9999999999999})
+        self.assertIn("cwd", resumed.prepare())
+        self.assertEqual(self.remote["claims"], 2)
+
     def worker(self, text="implemented\n", summary="AC verified, tests passed"):
         worker = FakeWorkflow(self.config, "worker", self.remote)
         context = worker.prepare()
@@ -700,6 +732,17 @@ class GitHubWorkflowTest(unittest.TestCase):
         worker.finish()
         self.assertEqual(self.remote["prs"][1]["head"]["sha"], sha)
         self.assertEqual(len(self.remote["prs"]), 1)
+
+    def test_recovery_loads_project_workflow_when_started_without_prepare_context(self):
+        worker, cwd = self.manifest_worker(["app.txt"])
+        (cwd / "app.txt").write_text("implemented\n")
+        with patch.object(worker, "git_remote", side_effect=WorkflowError("unknown push failure")):
+            self.assertEqual(self.finish_through_cli(worker)[0], 76)
+        context = worker.prepare()
+        atomic_json(Path(context["resultPath"]), {"action": "retry", "summary": "Diagnosed; preserved prior evidence"})
+        worker.workflow = {}  # the recover command starts in a fresh process without prepare()
+        worker.apply_recovery()
+        self.assertEqual("main", worker.workflow["baseBranch"])
 
     def test_agent_may_revise_manifest_but_cannot_modify_during_diagnosis(self):
         worker, cwd = self.manifest_worker([".mcp.json"])

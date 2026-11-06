@@ -1,6 +1,24 @@
 # GitHub Workflow
 
-ManagerのUI受入用のPlaywright MCP接続・検証用Server設定・証跡・終了管理は [Managerの実ブラウザ検証](BROWSER.md) を参照する。
+## Taskの開始条件
+
+Projectの`.ralph/config.json`の`taskDependencies`で、Task IDから先行Task IDの配列を明示できる。
+
+```json
+{
+  "taskDependencies": {
+    "task-next": ["task-first", "task-foundation"]
+  }
+}
+```
+
+Workerの新規Claim・保留からの復元・Agent起動候補の選択では、全先行Taskが同じProjectで`accepted`になっていることを確認する。`canceled`、不明、未取得は充足と扱わない。自己参照・循環・重複・不正な型は設定エラーとする。未設定のTaskには追加の開始条件を課さない。ReviewerとManagerの段階にはこの開始条件を再適用しない。
+
+前提の成立はポーリングで確認し、未成立のTaskではAgentを起動しない。明示的な`resume`も前提を迂回しない。説明文やsortOrderから依存関係を推論しない。取得上限500件で先行Taskを確認できない場合も待機する。
+
+この設定は当該ProjectのRalph実行に適用する。WachaのClaim契約や別クライアントには開始条件を追加しない。計画を変更するときはTaskの開始条件と設定を同時に更新する。既存の実行中Taskの成果物を、この設定だけで破棄しない。
+
+各RoleのUI検証用のPlaywright MCP接続・検証用Server設定・証跡・終了管理は [Roleの実ブラウザ検証](BROWSER.md) を参照する。
 
 ## 役割と実行境界
 
@@ -183,4 +201,4 @@ Workerが前提Taskの変更を取り込むためにHEADを進めた場合、Ral
 
 Taskの`completionMode`は通常`pull_request`。ManagerがRepository変更を必要としない運用Taskに`evidence`を選択した場合、Workerは`files: []`と操作・検証の証跡を返す。Ralphは未変更のworktreeを確認して完了を反映し、PR・commitを作成しない。Reviewerの独立検証とManagerのAC受入は通常どおり必要。Workerが自己判断でモードを変更したり、PR必須のTaskを証跡だけで完了させたりすることはできない。
 
-Reviewer/Managerは検証対象Worktreeを変更せず、[検証準備の編集境界](BROWSER.md#検証準備の編集境界)に従いProjectが宣言した実行専用の準備ファイルを修正できる。準備側の版・差分と再検証を記録し、本体のSHA・AC・期待結果・業務規則を固定する。準備の修正を本体へのcommit/mergeや既存結果の無条件な再送として扱わない。
+Reviewer/Managerは検証対象Worktreeを変更せず、[検証準備の編集境界](BROWSER.md#検証準備の編集境界)に従いProjectが宣言した実行専用の準備ファイルを修正できる。準備側の版・差分と再検証を記録し、本体のSHA・AC・期待結果・業務規則を固定する。準備の修正を本体へのcommit/mergeや既存結果の無条件な再送として扱わない。Workerは実装中のWorktreeを変更できるため、準備コードの依存先を変えるTaskでは、同じ準備ファイルをWorktreeと専用コピーの両方で更新し、専用コピーの差分と使用版を報告する。復旧の初期化（`recover`）はprepareを経由しないため、Projectの`workflow`（`baseBranch`等）を実行時に読み込む。

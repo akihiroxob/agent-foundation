@@ -67,8 +67,14 @@ class PreparationWorkspaceTest(unittest.TestCase):
         for bad in ("scripts", ["../app.txt"], ["/tmp/prepare.py"], [".git/config"], [".ralph/config.json"], ["scripts/../app.txt"], ["scripts/prepare.py/"]):
             with self.assertRaises(WorkflowError): preparation_files({"verification": {"preparationFiles": bad}})
         self.workflow.role = "worker"
+        self.workflow.state["claimId"] = "worker-claim"
+        workspace = ensure_preparation(self.workflow)
+        self.assertEqual(["scripts/prepare.py"], workspace["files"])
+        self.assertIn("pinned preparation", (Path(workspace["directory"]) / "scripts/prepare.py").read_text())
+        self.workflow.role = "unknown"
         self.assertIsNone(ensure_preparation(self.workflow))
         self.workflow.role = "reviewer"
+        self.workflow.state["claimId"] = "claim123"
         self.workflow.config["verification"]["preparationFiles"] = ["missing.py"]
         with self.assertRaisesRegex(WorkflowError, "pinned revision"):
             ensure_preparation(self.workflow)

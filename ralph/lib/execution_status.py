@@ -64,13 +64,24 @@ def filter_summary(root: Path, config: dict, role: str, summary: dict, accepted:
     principal = principal_for(config, role)
     runtime = read_object(root / ".ralph/runtime.json") if (root / ".ralph/runtime.json").exists() else {}
     generation = runtime.get("agents", {}).get(principal, {}).get(role, {}).get("resumeGeneration", 0)
+    if __package__:
+        from .task_dependencies import filter_dependencies, unmet_dependencies
+    else:
+        from task_dependencies import filter_dependencies, unmet_dependencies
     deferred = []
+    dependency_waiting = {}
     restoring = {}
     for path, record in deferred_records(root, role):
         if summary.get("projectId") and record.get("projectId") != summary["projectId"]:
             continue
+        missing = unmet_dependencies(config, record["task"]["id"], accepted or []) if role == "worker" else []
+        if missing:
+            dependency_waiting[record["task"]["id"]] = {
+                "taskId": record["task"]["id"], "prerequisiteIds": missing}
+            continue
         explicit = generation > record.get("deferredResumeGeneration", 0)
-        if record.get("principal") == principal and (explicit or accepted_changes(record, accepted or [])):
+        if (record.get("principal") == principal and (explicit or accepted_changes(record, accepted or []))
+                and (role != "worker" or not unmet_dependencies(config, record["task"]["id"], accepted or []))):
             # Restoring a saved execution must run even while its own Claim hides it from availableFor.
             task = record["task"]
             restoring[task["id"]] = {"id": task["id"], "status": task.get("status", {"worker": "doing", "reviewer": "in_review", "manager": "wait_accept"}[role])}
@@ -81,7 +92,9 @@ def filter_summary(root: Path, config: dict, role: str, summary: dict, accepted:
     tasks = [task for task in summary.get("tasks", []) if task["id"] not in blocked]
     present = {task["id"] for task in tasks}
     tasks.extend(task for task_id, task in restoring.items() if task_id not in present and task_id not in blocked)
-    return {**summary, "remoteAvailableCount": summary.get("availableCount", 0), "tasks": tasks,
+    tasks, waiting = filter_dependencies(config, role, tasks, accepted or [])
+    dependency_waiting.update({item["taskId"]: item for item in waiting})
+    return {**summary, "dependencyWaitingCount": len(dependency_waiting), "dependencyWaiting": list(dependency_waiting.values()), "remoteAvailableCount": summary.get("availableCount", 0), "tasks": tasks,
         "availableCount": len(tasks), "availableRejected": sum(task["status"] == "rejected" for task in tasks),
         "deferredCount": len(deferred), "deferred": deferred}
 
@@ -161,12 +174,19 @@ def main():
         if record.get("principal") == principal_for(config, args.role)
         and record.get("projectId") == summary.get("projectId") and can_recheck(record)]
     accepted = []
-    if own:
+    if own or (args.role == "worker" and config.get("taskDependencies")):
         if __package__:
             from .github_workflow import Workflow
         else:
             from github_workflow import Workflow
-        accepted = accepted_tasks(Workflow(args.config, args.role), own)
+        workflow = Workflow(args.config, args.role)
+        accepted = accepted_tasks(workflow, own)
+        if args.role == "worker" and config.get("taskDependencies"):
+            if __package__:
+                from .task_dependencies import accepted_prerequisites
+            else:
+                from task_dependencies import accepted_prerequisites
+            accepted = [{**task, "projectId": summary["projectId"]} for task in accepted_prerequisites(workflow, summary["projectId"])]
     print(json.dumps(filter_summary(root, config, args.role, summary, accepted), ensure_ascii=False))
 
 

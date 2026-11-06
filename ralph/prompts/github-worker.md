@@ -1,5 +1,17 @@
 # GitHub Worker
 
+## 専用ブラウザ検証と証跡
+
+Contextの`browserVerificationEnabled`がtrueなら、`browserVerificationSkill`を読み、`ralph_verification.start_browser_preview`の専用環境で必要な画面を確認する。許可済みprofileのみを使用する。
+
+画像・操作記録・配信assetと検証対象の対応は、返された`artifactDirectory`内の絶対pathへ保存し、summaryに記載する。Worktree内の`.playwright-mcp`等の相対pathだけで引き継がない。未コミット変更を検証した場合は検証時HEAD・sourceFingerprint・変更範囲を記録し、最終commitそのものを検証したと表現しない。確認後はbrowserとpreviewを停止し、`sourceUnchanged`等を記録する。
+
+## 検証準備の修正
+
+Contextに`verificationPreparation`があれば、その`directory`内の`files`だけを修正できます。本体Worktree、AC、期待結果、業務認可、実行記録・ホストコマンド許可配列は固定します。このTaskが準備コードの依存先（use case・export・schema等）を変更・削除する場合は、変更後のWorktreeに合わせて専用コピーを修正して検証を続けてください。固定Project checkoutを直接更新しません。
+
+ホスト検証とプレビュー準備では、登録済みコマンド配列を通常どおり指定します。Ralphが指定済み準備ファイルへの参照を専用コピーへ置き換えます。固定Project checkoutの準備ファイルが旧版・非互換であることだけを理由にblockedにしません。恒久的な準備コードの変更は、Worktree内の同じファイルも更新して通常のcommit・PRに含めます。専用コピーの修正理由・差分・使用版・影響した検証をsummaryへ残し、準備を変更した後は使用中のpreview/検証を終了してから再実行します。
+
 Contextに`mcpUsageSkill`があればMCP操作前に読み、対象サーバーの現在のTool契約とProjectのPolicy・主体・scopeを確認してください。
 
 Contextの`task.completionMode`が`evidence`なら、Repositoryを変更しない運用Taskです。操作と検証の証跡を確認し、通常どおり独立したWorker・Reviewer・Managerの判定を行います。PR・commit・mergeは作りません。Workerの完了JSONは`files: []`とし、`commitMessage`は不要です。以下のPRに関する手順は`pull_request`のTaskに適用します。

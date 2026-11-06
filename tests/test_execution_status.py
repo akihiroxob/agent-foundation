@@ -31,6 +31,26 @@ class ExecutionStatusTest(unittest.TestCase):
         self.assertEqual(summary['deferred'][0]['reason'],'前提Taskの受入待ちです。')
         self.assertEqual(summary['deferred'][0]['recordPath'],str(self.record))
 
+    def test_dependency_wait_is_distinct_from_deferral_and_resume_waits_for_all_prerequisites(self):
+        record = json.loads(self.record.read_text())
+        record.update(role="worker", principal="worker", deferredAt=100, releasedClaim=True,
+            pendingResult={"decision": "blocked"})
+        self.record.write_text(json.dumps(record))
+        self.config["taskDependencies"] = {"blocked": ["first", "second"]}
+        (self.root / '.ralph/runtime.json').write_text(json.dumps(
+            {"agents": {"worker": {"worker": {"resumeGeneration": 1}}}}))
+        accepted = [{"id": "first", "projectId": "p", "status": "accepted", "updatedAt": 101}]
+        summary = {"projectId": "p", "tasks": [{"id": "blocked", "status": "todo"}], "availableCount": 1}
+        result = filter_summary(self.root, self.config, "worker", summary, accepted)
+        self.assertEqual(result["availableCount"], 0)
+        self.assertEqual(result["dependencyWaitingCount"], 1)
+        self.assertEqual(result["deferredCount"], 0)
+        self.assertEqual(result["dependencyWaiting"][0]["prerequisiteIds"], ["second"])
+        accepted.append({"id": "second", "projectId": "p", "status": "accepted", "updatedAt": 102})
+        result = filter_summary(self.root, self.config, "worker", summary, accepted)
+        self.assertEqual(result["availableCount"], 1)
+        self.assertEqual(result["dependencyWaitingCount"], 0)
+
     def test_explicit_resume_makes_own_task_eligible_for_restoration(self):
         (self.root/'.ralph/runtime.json').write_text(json.dumps({"agents":{"manager":{"manager":{"resumeGeneration":1}}}}))
         summary=filter_summary(self.root,self.config,'manager',{"projectId":"p","availableCount":1,"tasks":[{"id":"blocked","status":"wait_accept"}]})

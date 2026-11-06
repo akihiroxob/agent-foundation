@@ -128,6 +128,7 @@ class OperationRecovery:
         else:
             from github_workflow import run, atomic_json, WorkflowError
         recovery = self.state["operationRecovery"]
+        self.load_project_workflow()
         cwd = self.recovery_cwd()
         path = Path(recovery["decisionPath"])
         if path != cwd / ".ralph/recovery-result.json":
@@ -211,11 +212,20 @@ class OperationRecovery:
     def restore_deferred(self):
         if __package__:
             from .execution_status import accepted_tasks, accepted_changes
+            from .task_dependencies import accepted_prerequisites, unmet_dependencies
         else:
             from execution_status import accepted_tasks, accepted_changes
+            from task_dependencies import accepted_prerequisites, unmet_dependencies
         records = [(path, record) for path, record in self.deferred_records() if record["principal"] == self.principal]
         accepted = None
+        prerequisite_cache = {}
         for path, record in records:
+            if self.role == "worker" and self.config.get("taskDependencies"):
+                project_id = record["projectId"]
+                if project_id not in prerequisite_cache:
+                    prerequisite_cache[project_id] = accepted_prerequisites(self, project_id)
+                if unmet_dependencies(self.config, record["task"]["id"], prerequisite_cache[project_id]):
+                    continue
             explicit = self.resume_generation() > record.get("deferredResumeGeneration", 0)
             changes = []
             if not explicit:

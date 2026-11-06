@@ -28,7 +28,7 @@ def preparation_files(config: dict) -> list[str]:
 
 def ensure_preparation(workflow) -> dict | None:
     files = preparation_files(workflow.config)
-    if workflow.role not in {"reviewer", "manager"} or not files:
+    if workflow.role not in {"worker", "reviewer", "manager"} or not files:
         return None
     cwd = Path(workflow.state["cwd"])
     head = run("git", "rev-parse", "HEAD", cwd=cwd)

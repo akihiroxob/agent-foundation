@@ -94,7 +94,7 @@ class BrowserPreviewTest(unittest.TestCase):
             except PermissionError:
                 self.skipTest("Loopback binding requires host execution")
 
-    def test_manager_only_deployed_definition_and_missing_install(self):
+    def test_all_roles_receive_durable_claim_output_and_missing_install_fails(self):
         config = Workflow(self.config, "manager").agent_mcp_config("claim123")["mcpServers"]
         self.assertEqual(config["playwright"]["args"][:-2], self.playwright["args"])
         self.assertEqual(config["playwright"]["args"][-2], "--output-dir")
@@ -102,11 +102,33 @@ class BrowserPreviewTest(unittest.TestCase):
         self.assertEqual(config["unrelated"], {"command": "never"})
         for role in ("worker", "reviewer"):
             role_servers = Workflow(self.config, role).agent_mcp_config("claim123")["mcpServers"]
-            self.assertEqual(role_servers["playwright"], self.playwright)
-            self.assertNotIn("ralph_verification", role_servers)
+            self.assertEqual(role_servers["playwright"]["args"][-2:],
+                ["--output-dir", str(self.root / ".ralph/verification/claim123/browser")])
+            self.assertIn("ralph_verification", role_servers)
         (self.root / ".mcp.json").unlink()
         with self.assertRaisesRegex(WorkflowError, "Install the APM"):
             Workflow(self.config, "manager").agent_mcp_config("claim123")
+
+    def test_reviewer_preview_records_target_sha_and_preserves_screenshot_after_worktree_removal(self):
+        self.require_loopback()
+        cwd = self.root / ".ralph/worktrees/reviewer/reviewer"
+        run("git", "worktree", "add", "--detach", str(cwd), "HEAD", cwd=self.root)
+        atomic_json(self.root / ".ralph/github-state/reviewer/reviewer.json",
+            {"claimId": "review-claim", "task": {"id": "task"}, "cwd": str(cwd)})
+        server = VerificationServer(self.config, "reviewer", "review-claim")
+        self.addCleanup(server.preview.stop)
+        tools = server.handle({"id": 1, "method": "tools/list"})["result"]["tools"]
+        self.assertIn("start_browser_preview", {tool["name"] for tool in tools})
+        record = server.preview.start({})
+        self.assertEqual(record["headSha"], run("git", "rev-parse", "HEAD", cwd=cwd))
+        screenshot = Path(record["artifactDirectory"]) / "screen.png"
+        screenshot.write_bytes(b"example evidence")
+        result = server.handle({"id": 2, "method": "tools/call", "params":
+            {"name": "stop_browser_preview", "arguments": {}}})["result"]
+        self.assertFalse(result["isError"])
+        self.assertTrue(result["structuredContent"]["sourceUnchanged"])
+        run("git", "worktree", "remove", str(cwd), cwd=self.root)
+        self.assertTrue(screenshot.is_file())
 
     def test_invalid_configuration_and_shared_profiles_fail_closed(self):
         for value in (False, {}, {"command": "npm start"}, {"command": ["npm"], "cwd": "/tmp"},

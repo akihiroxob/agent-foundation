@@ -1,6 +1,6 @@
-# Managerの実ブラウザ検証
+# Roleの実ブラウザ検証
 
-GitHub ManagerはPlaywright MCPと `verify-browser-ac` SkillでUIの受入条件を独立に確認する。E2Eテストの事前作成は不要。SkillはAPMで配布し、Ralphインストーラーにも同梱する。Projectの `.mcp.json` の定義は各Roleへ共通に配信し、Manager専用の証跡出力先とpreview接続を実行時に追加する。
+GitHub Worker・Reviewer・ManagerはPlaywright MCPと `verify-browser-ac` SkillでUIの受入条件を独立に確認する。E2Eテストの事前作成は不要。SkillはAPMで配布し、Ralphインストーラーにも同梱する。Projectの `.mcp.json` の定義は各Roleへ共通に配信し、Claim専用の証跡出力先とpreview接続を実行時に追加する。
 
 ## 設定
 
@@ -27,11 +27,11 @@ Projectの `.ralph/config.json` にホストで起動する検証用Serverを設
 
 `command`はshell文字列ではなく引数配列。`env`は検証用の値だけを明示する。`{port}`・`{dataDir}`は実行専用に割り当て、commandとenvの文字列で置換する。DB・認証・fixtureの設定名はProjectに合わせる。既存の開発DB・運用DBは指定しない。依存関係は既存の `github.setupCommands` で準備する。Serverは割り当てたポートのloopbackで待ち受けるよう設定する。`readyPath`は既定 `/`、起動待ちは120秒。HTTP 2xx/3xx/401/403で到達を確認する。
 
-## Managerからの利用
+## 各Roleからの利用
 
-Contextの `browserVerificationEnabled` がtrueなら、`browserVerificationSkill` を読む。ProjectのMCP定義にManager用の設定を重ねた `.ralph/mcp.json` を、共通アダプターが各CLIの形式へ変換して渡す。Provider内にPlaywright固有の分岐は持たない。MCPの管理方法は [MCP設定](MCP.md) を参照する。Playwright MCPはAgentのsandbox内のshellから起動しない。初回npm取得とブラウザ本体の準備はホスト側で必要。
+Contextの `browserVerificationEnabled` がtrueなら、`browserVerificationSkill` を読む。ProjectのMCP定義にClaim別の設定を重ねた `.ralph/mcp.json` を、共通アダプターが各CLIの形式へ変換して渡す。Provider内にPlaywright固有の分岐は持たない。MCPの管理方法は [MCP設定](MCP.md) を参照する。Playwright MCPはAgentのsandbox内のshellから起動しない。初回npm取得とブラウザ本体の準備はホスト側で必要。
 
-`ralph_verification.start_browser_preview` を通常は引数なしで呼び、返されたURLをPlaywrightで操作する。統合SHAと `headSha` を照合する。ログイン・テストデータ準備はRepositoryの手順を使う。正常・空状態・権限差・狭い画面・キーボード等をACに応じて確認する。見た目の確認はスクリーンショットを取得し、画像を読む。準備完了やHTTP成功だけでACを受け入れない。
+`ralph_verification.start_browser_preview` を通常は引数なしで呼び、返されたURLをPlaywrightで操作する。ReviewerはPR head、Managerは統合SHAと `headSha` を照合する。Workerは検証時HEADと未コミット差分のfingerprintを残す。ログイン・テストデータ準備はRepositoryの手順を使う。正常・空状態・権限差・狭い画面・キーボード等をACに応じて確認する。見た目の確認はスクリーンショットを取得し、画像を読む。準備完了やHTTP成功だけでACを受け入れない。
 
 証跡は `.ralph/verification/<claimId>/browser/` に保持する。Playwrightのoutput directoryも同じ場所に設定し、worktreeの掃除後も残す。`session-*/preview.json` に対象SHA・source fingerprint・Serverログpath・開始/終了時刻・停止理由を記録する。環境変数は最小限のOS設定と明示した検証用envだけであり、RalphのGitHub tokenやWacha Credentialを継承しない。
 
@@ -53,7 +53,7 @@ Contextの `browserVerificationEnabled` がtrueなら、`browserVerificationSkil
 
 ## 検証データの不足への対応
 
-初期データだけでACの状態が揃わない場合は、Managerが利用先RepositoryのPolicyに従い、専用プレビューの公開API等で検証データを追加する。実行Contextの業務Task/Claimへの操作禁止と、専用環境の検証用Entity操作を区別する。許可する主体・操作・接続先はProjectが定め、共通Skillへ製品固有のAPIやDB構造を記載しない。未許可のホスト実行や運用データの変更を許可するものではない。
+初期データだけでACの状態が揃わない場合は、各Roleが利用先RepositoryのPolicyに従い、専用プレビューの公開API等で検証データを追加する。実行Contextの業務Task/Claimへの操作禁止と、専用環境の検証用Entity操作を区別する。許可する主体・操作・接続先はProjectが定め、共通Skillへ製品固有のAPIやDB構造を記載しない。未許可のホスト実行や運用データの変更を許可するものではない。
 
 ## 用途別のプレビュー
 
@@ -71,7 +71,7 @@ Projectは専用URL・データ保存先・検証用主体・Project/Workspace�
 
 ## 検証準備の編集境界
 
-Reviewer/Managerは、Project設定の`verification.preparationFiles`に指定したRepository相対ファイルの専用コピーを修正できる。未設定は編集不可。対象本体のSHAは固定したまま、準備コードの取得元を`verification.preparationRevision`の完全commit SHAで指定できる。省略時は本体と同じSHAを使う。ファイルはそのcommitのGit blobから取得するため、固定Project checkoutの古いコピーを使わない。必要なローカルimport先とPolicy文書も準備ファイルに含める。
+Worker/Reviewer/Managerは、Project設定の`verification.preparationFiles`に指定したRepository相対ファイルの専用コピーを修正できる。未設定は編集不可。対象本体のSHAは固定したまま、準備コードの取得元を`verification.preparationRevision`の完全commit SHAで指定できる。省略時は本体と同じSHAを使う。ファイルはそのcommitのGit blobから取得するため、固定Project checkoutの古いコピーを使わない。必要なローカルimport先とPolicy文書も準備ファイルに含める。
 
 ```json
 {

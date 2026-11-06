@@ -24,7 +24,7 @@
 - WachaはRalphの実行管理に必須の接続。URLとRole別の認証は既存のRalph設定に従う。Project側の同名定義よりRalph設定を優先する。
 - Projectの追加MCPは全Roleに共通して読み込む。
 - GitHub実行では、共通処理がProjectルートの定義へWachaとClaim専用の `ralph_verification` を重ね、worktreeの `.ralph/mcp.json` に保存する。必要なホスト検証やpreviewを設定した場合だけ検証接続を追加する。
-- Managerのブラウザ検証処理はPlaywrightの独立セッションを検証し、Claim別の証跡出力先を追加する。
+- 各Roleのブラウザ検証処理はPlaywrightの独立セッションを検証し、Claim別の証跡出力先を追加する。
 - Providerは共通アダプターの結果をCLIへ渡す。CodexのWacha専用接続は維持する。
 
 GitHub実行の設定元はProjectルートであり、worktree内の `.mcp.json` の変更で接続を差し替えない。元の `.mcp.json` は変更せず、生成した `.ralph/mcp.json` はGitへ登録しない。

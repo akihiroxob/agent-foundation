@@ -79,7 +79,7 @@ backend_format_status() {
   local role="$1"
   local summary="$2"
   if [[ "$role" == worker ]]; then
-    jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0) 保留=\(.deferredCount // 0)"' <<<"$summary"
+    jq -r '"Worker対象: todo=\(.byStatus.todo // 0) rejected=\(.byStatus.rejected // 0) doing=\(.byStatus.doing // 0) available=\(.availableCount // 0) 保留=\(.deferredCount // 0) 依存待ち=\(.dependencyWaitingCount // 0)"' <<<"$summary"
   elif [[ "$role" == reviewer ]]; then
     jq -r '"Reviewer対象: in_review=\(.byStatus.in_review // 0) available=\(.availableCount // 0) 保留=\(.deferredCount // 0)"' <<<"$summary"
   else

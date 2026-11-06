@@ -109,6 +109,11 @@ class Workflow(OperationRecovery):
         names = self.token_names()
         if any(not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]*_TOKEN", name) for name in names.values()):
             raise WorkflowError("github.tokenEnvs values must be dedicated *_TOKEN environment variable names")
+        if __package__:
+            from .task_dependencies import task_dependencies
+        else:
+            from task_dependencies import task_dependencies
+        task_dependencies(self.config)
         self.workflow: dict = {}
         self.phase = "initialization"
 
@@ -142,7 +147,7 @@ class Workflow(OperationRecovery):
             from .browser_preview import browser_config, playwright_config
         else:
             from browser_preview import browser_config, playwright_config
-        browser = browser_config(self.config) if self.role == "manager" else None
+        browser = browser_config(self.config) if self.role in {"worker", "reviewer", "manager"} else None
         if browser:
             servers["playwright"] = playwright_config(self.root)
             output = self.root / ".ralph/verification" / claim_id / "browser"
@@ -316,6 +321,14 @@ class Workflow(OperationRecovery):
             tasks = self.mcp("list_tasks", {"projectId": project["id"], "filter": {"availableFor": availability}})["tasks"]
             deferred = {(record["projectId"], record["task"]["id"]) for _, record in self.deferred_records()}
             tasks = [task for task in tasks if (project["id"], task["id"]) not in deferred]
+            if __package__:
+                from .task_dependencies import accepted_prerequisites, filter_dependencies
+            else:
+                from task_dependencies import accepted_prerequisites, filter_dependencies
+            accepted = accepted_prerequisites(self, project["id"]) if self.role == "worker" else []
+            tasks, waiting = filter_dependencies(self.config, self.role, tasks, accepted)
+            if waiting:
+                print("Dependency waiting Tasks excluded: " + str(len(waiting)), file=sys.stderr)
             if self.role == "manager":
                 tasks = [task for task in tasks if task["status"] == "wait_accept"]
             if self.role == "worker":
@@ -432,12 +445,13 @@ class Workflow(OperationRecovery):
             from .browser_preview import browser_config
         else:
             from browser_preview import browser_config
-        browser_enabled = self.role == "manager" and browser_config(self.config) is not None
+        browser_enabled = self.role in {"worker", "reviewer", "manager"} and browser_config(self.config) is not None
         skill = Path(__file__).resolve().parents[1] / "skills/verify-browser-ac/SKILL.md"
         if not skill.exists():
             skill = Path(__file__).resolve().parents[2] / ".apm/skills/verify-browser-ac/SKILL.md"
         return {**self.state, "workflow": self.workflow, "hostVerificationCommands": self.host_commands(),
             "browserVerificationEnabled": browser_enabled,
+            "verificationArtifactDirectory": str(self.root / ".ralph/verification" / self.state["mcpClaimId"] / "browser"),
             "browserVerificationSkill": str(skill) if browser_enabled else None,
             "mcpUsageSkill": str(skill.parent.parent / "use-mcp-tools/SKILL.md"),
             "recoveryTimeoutSeconds": self.recovery_remaining() if self.state.get("recoveryBudget") else 0}
@@ -693,8 +707,7 @@ class Workflow(OperationRecovery):
             except WorkflowError as error:
                 if "CLAIM_EXPIRED" not in str(error):
                     raise
-        project = next(item for item in self.mcp("list_projects", {})["projects"] if item["id"] == self.state["projectId"])
-        self.workflow = project["workflow"]
+        self.load_project_workflow()
         self.renew_or_reclaim()
         self.phase = "result:read"
         result = self.state.get("pendingResult")
@@ -708,7 +721,7 @@ class Workflow(OperationRecovery):
             self.state["pendingResult"] = result
             self.save()
         decision = result.get("decision")
-        if self.role in {"reviewer", "manager"}:
+        if self.role in {"worker", "reviewer", "manager"}:
             if __package__:
                 from .preparation_workspace import assert_preparation_verified, preparation_snapshot
             else:
@@ -835,6 +848,13 @@ class Workflow(OperationRecovery):
             # Only location/issue headers are returned; source lines may contain credentials.
             raise WorkerRepairNeeded("precommit_diff", "Pre-commit diff check failed", diagnostics)
         raise WorkflowError(f"git diff --cached --check failed (exit {result.returncode})")
+
+    def load_project_workflow(self) -> None:
+        """Recovery/finish start without prepare(), so the Project workflow must be read from the Project."""
+        if self.workflow:
+            return
+        project = next(item for item in self.mcp("list_projects", {})["projects"] if item["id"] == self.state["projectId"])
+        self.workflow = project["workflow"]
 
     def unchanged_merge_config(self, cwd: Path, file: str) -> bool:
         """Allow only tracked preview/MCP config inherited verbatim from the base branch."""

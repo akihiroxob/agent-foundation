@@ -466,7 +466,7 @@ while true; do
     current_epoch="$(date +%s)"
     normalized_summary="$(jq -cS . <<<"$summary")"
     if [[ "$mode" == auto ]]; then
-      status="$(jq -r '[to_entries[] | "\(.key):実行可能=\(.value.availableCount // 0),保留=\(.value.deferredCount // 0)"] | join(" / ")' <<<"$summary")"
+      status="$(jq -r '[to_entries[] | "\(.key):実行可能=\(.value.availableCount // 0),保留=\(.value.deferredCount // 0),依存待ち=\(.value.dependencyWaitingCount // 0)"] | join(" / ")' <<<"$summary")"
     else
       status="$(backend_format_status "$role" "$summary")"
     fi

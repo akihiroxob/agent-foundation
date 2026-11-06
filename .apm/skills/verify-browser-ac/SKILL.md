@@ -9,7 +9,7 @@ description: UIの受入条件を実ブラウザで検証し、操作・表示�
 
 ## 検証環境
 
-- Ralph Contextの`browserVerificationEnabled`がtrueなら、`ralph_verification`の`start_browser_preview`を呼ぶ。通常は引数なしとし、カタログ等の別サーバーが必要ならtools/listに公開された許可済み`profile`を選ぶ。切替前に現在のpreviewを停止する。返された`url`・`headSha`・`artifactDirectory`・`logPath`を記録し、対象の統合SHAと一致することを確認する。
+- Ralph Contextの`browserVerificationEnabled`がtrueなら、`ralph_verification`の`start_browser_preview`を呼ぶ。通常は引数なしとし、カタログ等の別サーバーが必要ならtools/listに公開された許可済み`profile`を選ぶ。切替前に現在のpreviewを停止する。返された`url`・`headSha`・`artifactDirectory`・`logPath`を記録し、ReviewerはPR head、Managerは統合SHAとの一致を確認する。Workerは検証時HEADと未コミット差分を区別して記録する。
 - 起動するコードは対象worktree、ポートと一時データは実行専用。既存の開発Serverや運用DBを代わりに使わない。アプリ固有のログイン・データ準備はRepositoryの手順に従い、戻り値の`dataDirectory`内のテストデータを使う。
 - Serverをsandbox内のシェルで起動し直したり、Agentからホストコマンド・環境変数・cwdを変更しない。起動失敗は`server.log`で切り分ける。Contextの`verificationPreparation`が許可する準備ファイルは専用コピーで修正し、完了済み検証を止めてから再起動・再検証する。
 
