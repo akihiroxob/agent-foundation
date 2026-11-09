@@ -12,6 +12,74 @@ from ralph.lib.preparation_workspace import (assert_preparation_verified, ensure
 
 
 class PreparationWorkspaceTest(unittest.TestCase):
+    def repaired_evidence(self):
+        workspace = ensure_preparation(self.workflow)
+        (Path(workspace["directory"]) / "scripts/prepare.py").write_text("print('repaired')\n")
+        current = preparation_snapshot(self.workflow)
+        record = {"claimId": "claim123", "headSha": current["headSha"], "sourceUnchanged": True,
+            "preparationUnchanged": True, "preparationWorkspace": current, "status": "passed"}
+        return self.root / ".ralph/verification/claim123", current, record
+
+    def test_array_notes_and_non_object_candidate_do_not_hide_valid_host_evidence(self):
+        area, current, record = self.repaired_evidence()
+        (area / "task-scope-facts.json").write_text('[1,2,3]')
+        (area / ("0" * 32 + ".json")).write_text('[1,2,3]')
+        atomic_json(area / ("1" * 32 + ".json"), record)
+        self.assertEqual(assert_preparation_verified(self.workflow), current)
+        self.assertEqual(json.loads((area / "task-scope-facts.json").read_text()), [1, 2, 3])
+
+    def test_notes_and_malformed_candidates_do_not_authorize_acceptance(self):
+        area, current, record = self.repaired_evidence()
+        atomic_json(area / "agent-note.json", record)
+        candidate = area / ("0" * 32 + ".json")
+        for value in ([], None, 7, 'text', {**record, 'status': ['passed']},
+                {**record, 'preparationWorkspace': []}, {**record, 'claimId': 'other'},
+                {**record, 'headSha': '0' * 40}):
+            with self.subTest(value_type=type(value).__name__):
+                candidate.write_text(json.dumps(value))
+                with self.assertRaisesRegex(WorkflowError, "fresh successful"):
+                    assert_preparation_verified(self.workflow)
+        candidate.write_text('{invalid json')
+        with self.assertRaises(WorkflowError):
+            assert_preparation_verified(self.workflow)
+
+    def test_valid_preview_is_accepted_and_wrong_preparation_or_symlink_is_rejected(self):
+        area, current, record = self.repaired_evidence()
+        path = area / "browser" / ("session-" + "2" * 32) / "preview.json"
+        atomic_json(path, {**record, "status": "stopped"})
+        self.assertEqual(assert_preparation_verified(self.workflow), current)
+        atomic_json(path, {**record, "status": "stopped", "preparationWorkspace": {**current, "fingerprint": "wrong"}})
+        with self.assertRaises(WorkflowError):
+            assert_preparation_verified(self.workflow)
+        outside = self.root / 'outside-evidence.json'
+        atomic_json(outside, record)
+        path.unlink()
+        path.symlink_to(outside)
+        with self.assertRaises(WorkflowError):
+            assert_preparation_verified(self.workflow)
+
+    def test_head_advance_versions_preparation_and_retains_edits_without_reusing_success(self):
+        old = ensure_preparation(self.workflow)
+        script = Path(old["directory"]) / "scripts/prepare.py"
+        script.write_text("print('previous HEAD repair')\n")
+        before = script.read_bytes()
+        pinned = old["sourceSha"]
+        (self.cwd / "app.txt").write_text("next product version")
+        run("git", "add", "app.txt", cwd=self.cwd)
+        run("git", "commit", "-m", "advance product", cwd=self.cwd)
+        self.workflow.config["verification"]["preparationRevision"] = pinned
+        current = ensure_preparation(self.workflow)
+        self.assertNotEqual(current["directory"], old["directory"])
+        self.assertEqual(current["previousPreparation"]["directory"], old["directory"])
+        self.assertEqual(current["headSha"], run("git", "rev-parse", "HEAD", cwd=self.cwd))
+        self.assertEqual(script.read_bytes(), before)
+        self.assertIn("pinned preparation", (Path(current["directory"]) / "scripts/prepare.py").read_text())
+        self.assertEqual(current, ensure_preparation(self.workflow))
+        current_script = Path(current["directory"]) / "scripts/prepare.py"
+        current_script.write_bytes(before)
+        with self.assertRaisesRegex(WorkflowError, "fresh successful"):
+            assert_preparation_verified(self.workflow)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -102,7 +170,7 @@ class PreparationWorkspaceTest(unittest.TestCase):
         current = preparation_snapshot(self.workflow)
         with self.assertRaisesRegex(WorkflowError, "fresh successful"):
             assert_preparation_verified(self.workflow)
-        path = self.root / ".ralph/verification/claim123/host-result.json"
+        path = self.root / ".ralph/verification/claim123" / ("1" * 32 + ".json")
         record = {"claimId": "claim123", "headSha": current["headSha"], "sourceUnchanged": True,
             "preparationUnchanged": True, "preparationWorkspace": current, "status": "passed"}
         atomic_json(path, record)
@@ -112,6 +180,7 @@ class PreparationWorkspaceTest(unittest.TestCase):
             assert_preparation_verified(self.workflow)
         copy.write_text("print('new preparation')\n")
         for key, value in (("claimId", "another"), ("headSha", "0" * 40), ("sourceUnchanged", False),
-                           ("preparationUnchanged", False), ("status", "failed")):
+                           ("preparationUnchanged", False), ("status", "failed"), ("status", ["passed"]),
+                           ("preparationWorkspace", [])):
             atomic_json(path, {**record, key: value})
             with self.assertRaises(WorkflowError): assert_preparation_verified(self.workflow)

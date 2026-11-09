@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import signal
+import shutil
 import sys
 from pathlib import Path
 
@@ -17,6 +18,12 @@ from runtime_state import (acquire_roles, execution_path, migrate, operate,
 RUNTIME_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = RUNTIME_ROOT / "examples" / "config.json"
 LOOP_COMMAND = RUNTIME_ROOT / "bin" / "ralph-loop"
+
+
+def runner_command(config_path, roles):
+    command = [str(LOOP_COMMAND), "--config", str(config_path), *roles]
+    inhibitor = shutil.which("caffeinate") if sys.platform == "darwin" else None
+    return [inhibitor, "-i", *command] if inhibitor else command
 
 
 def find_project_root(explicit: Path | None = None) -> Path:
@@ -170,7 +177,7 @@ def run_command(args: argparse.Namespace) -> int:
         environment = os.environ.copy()
         environment["RALPH_ROLE_PRINCIPALS"] = json.dumps(identities)
         environment["RALPH_RUNNER_MANAGED"] = "1"
-        return run_managed([str(LOOP_COMMAND), "--config", str(config_path), *args.roles],
+        return run_managed(runner_command(config_path, args.roles),
                            env=environment, pass_fds=tuple(handles))
     except (ValueError, KeyError, OSError) as error:
         print(str(error), file=sys.stderr)

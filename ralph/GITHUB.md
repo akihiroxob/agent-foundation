@@ -1,5 +1,13 @@
 # GitHub Workflow
 
+## スリープと復旧予算
+
+結果処理の内部型エラー（`AttributeError`・`TypeError`）は、段階・Task・実行記録を保存して終了コード78を返し、該当Roleをpauseする。同じプログラム不具合を製品Agentへ繰り返し修正依頼したり、保存済み判断を無期限に再試行したりしない。修正後は外部状態と保持した判断を照合して再開する。
+
+macOSでは、`caffeinate`が利用できるときRunnerの起動中は`-i`で自動idle sleepを抑止する。画面のsleep・明示的なsleep・蓋を閉じる操作・電源断を防ぐものではない。他のOSや同コマンドがない環境では通常起動する。中断後はTask・Claim・対象SHAを照合して再開し、Claim期限を無効にしない。
+
+操作失敗・Worker修復の時間予算は、新規実行ではmonotonic時計で計測する。既存の時刻形式には互換処理を持つ。検証Claimの更新は時間予算を持ち越さず、回数を制限して再実行する。期限切れで保留するときも、Agentが書き終えた有効な結果JSONを保存済み判断として保持し、再開時の照合に使う。
+
 ## Taskの開始条件
 
 Projectの`.ralph/config.json`の`taskDependencies`で、Task IDから先行Task IDの配列を明示できる。

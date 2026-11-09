@@ -282,6 +282,7 @@ class Workflow(OperationRecovery):
             raise WorkflowError("origin must match the Wacha Project GitHub repository")
 
     def prepare(self) -> dict:
+        self.separate_verification_budget()
         self.retry_completed_cleanup()
         if self.state.get("restorePending"):
             self.finish_restore()
@@ -438,6 +439,9 @@ class Workflow(OperationRecovery):
         self.state["mcpClaimId"] = self.state["claimId"]
         self.state["agentMcpConfig"] = self.agent_mcp_config(self.state["mcpClaimId"])
         atomic_json(directory / ".ralph" / "mcp.json", self.state["agentMcpConfig"])
+        expired_context = self.state.get("verificationRecoveryRequired")
+        if expired_context and expired_context.get("claimId") != self.state["mcpClaimId"]:
+            self.state.pop("verificationRecoveryRequired")
         result_path = Path(self.state["resultPath"])
         result_path.unlink(missing_ok=True)
         self.save()
@@ -689,8 +693,33 @@ class Workflow(OperationRecovery):
         self.cleanup_record(archive, self.state)
         self.clear()
 
+    def retry_verification(self, result: dict, reason: str) -> None:
+        attempt, limit = self.reserve_verification_retry()
+        directory = self.root / ".ralph/verification" / self.state.get("worktreeClaimId", self.state["claimId"]) / "verification-retry" / str(attempt)
+        atomic_json(directory / "execution.json", self.state)
+        atomic_json(directory / "result.json", result)
+        self.state["verificationRetry"] = {"attempt": attempt, "limit": limit,
+            "previousResultPath": str(directory / "result.json"), "reason": reason,
+            "instruction": "Ralph refreshed the expired verification Context. Retain the previous review, work and evidence. Use the new Claim-bound MCP Context to obtain fresh successful preparation verification for the same pinned SHA and preparation fingerprint, rerun other affected or unfinished checks, and produce a fresh decision. Do not relabel old evidence or repeat unrelated completed investigation."}
+        self.state.pop("pendingResult", None)
+        self.state.pop("verificationRecoveryRequired", None)
+        Path(self.state["resultPath"]).unlink(missing_ok=True)
+        self.save()
+        raise ReviewRepairScheduled(reason + "; refresh verification MCP Context and return to the Role")
+
     def finish(self) -> None:
+        self.separate_verification_budget()
         if self.state.get("recoveryBudget") and not self.recovery_remaining():
+            # Preserve a completed Agent response before parking an expired repair.
+            path = Path(self.state.get("resultPath", ""))
+            if not self.state.get("pendingResult") and path.is_file() and not path.is_symlink():
+                try:
+                    saved = json.loads(path.read_text())
+                    if isinstance(saved, dict) and isinstance(saved.get("summary"), str) and saved["summary"].strip():
+                        self.state["pendingResult"] = saved
+                        self.save()
+                except (ValueError, OSError):
+                    pass  # Invalid/unfinished bytes remain in the retained Worktree.
             self.defer_execution("Recovery elapsed time limit reached")
             raise RecoveryDeferred("Recovery elapsed time limit reached")
         if not self.state:
@@ -726,23 +755,17 @@ class Workflow(OperationRecovery):
                 from .preparation_workspace import assert_preparation_verified, preparation_snapshot
             else:
                 from preparation_workspace import assert_preparation_verified, preparation_snapshot
+            if decision in {"approve", "accept"} and self.state.get("mcpClaimId") != self.state["claimId"]:
+                current = preparation_snapshot(self)
+                if current is not None and current["changedFiles"]:
+                    self.retry_verification(result, "Claim changed after verification; fresh preparation evidence is required")
             snapshot = assert_preparation_verified(self) if decision in {"approve", "accept"} else preparation_snapshot(self)
             if snapshot is not None:
                 self.state["verificationPreparationEvidence"] = snapshot
                 self.save()
 
         if decision == "blocked" and self.state.get("verificationRecoveryRequired"):
-            attempt, limit = self.reserve_recovery_budget("verification_context", "Claim expired during host verification")
-            directory = self.root / ".ralph/verification" / self.state.get("worktreeClaimId", self.state["claimId"]) / "verification-retry" / str(attempt)
-            atomic_json(directory / "execution.json", self.state)
-            atomic_json(directory / "result.json", result)
-            self.state["verificationRetry"] = {"attempt": attempt, "limit": limit, "previousResultPath": str(directory / "result.json"),
-                "instruction": "Ralph refreshed the expired verification Context. Preserve previous work and verified evidence, rerun the unfinished host/browser verification, and produce a fresh decision."}
-            self.state.pop("pendingResult", None)
-            self.state.pop("verificationRecoveryRequired", None)
-            Path(self.state["resultPath"]).unlink(missing_ok=True)
-            self.save()
-            raise ReviewRepairScheduled("Verification Context refreshed; rerun unfinished checks with retained work")
+            self.retry_verification(result, "Verification Claim expired during host/browser checks")
         if decision == "blocked":
             self.note(result["summary"])
             self.command("release_claim", {"reason": result["summary"]})
@@ -1216,7 +1239,7 @@ def main() -> int:
             workflow.save_error(args.command, str(error), retryable=True)
         print(str(error), file=sys.stderr)
         return 75
-    except (WorkflowError, ValueError, KeyError, OSError) as error:
+    except (WorkflowError, ValueError, KeyError, OSError, AttributeError, TypeError) as error:
         if isinstance(error, WorkflowError):
             reason = str(error)
         elif isinstance(error, json.JSONDecodeError):
@@ -1224,6 +1247,13 @@ def main() -> int:
         elif isinstance(error, KeyError):
             field = str(error.args[0])
             reason = "Required field missing: " + (field if re.fullmatch(r"[A-Za-z0-9_.-]+", field) else "unknown field")
+        elif isinstance(error, (AttributeError, TypeError)):
+            frame = error.__traceback__
+            while frame and frame.tb_next:
+                frame = frame.tb_next
+            filename = Path(frame.tb_frame.f_code.co_filename).name if frame else "unknown"
+            location = f"{filename}:{frame.tb_lineno}" if frame and re.fullmatch(r"[A-Za-z0-9_.-]+", filename) else "unknown location"
+            reason = f"Internal data-shape error ({type(error).__name__}) at {location}; execution retained for maintenance"
         elif isinstance(error, OSError):
             reason = f"{type(error).__name__}: {os.strerror(error.errno) if error.errno else 'local file/OS operation failed'}"
         else:
@@ -1233,6 +1263,11 @@ def main() -> int:
                 workflow.state["executionError"] = {"phase": "finish", "reason": reason, "occurredAt": int(time.time() * 1000)}
                 workflow.save()
             workflow.save_error(args.command, reason)
+            if isinstance(error, (AttributeError, TypeError)):
+                # A programming/data-contract fault cannot be repaired by rerunning
+                # the product Agent. Pause this Role with its saved decision intact.
+                print(f"{args.role} {args.command}: {reason}", file=sys.stderr)
+                return 78
             if args.command in {"prepare", "finish", "recover", "agent-failed"} and workflow.state.get("cwd"):
                 try:
                     workflow.schedule_operation_recovery(args.command, reason)

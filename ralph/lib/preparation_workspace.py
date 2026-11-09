@@ -44,9 +44,26 @@ def ensure_preparation(workflow) -> dict | None:
         raise WorkflowError("Preparation area is redirected")
     if control.exists():
         record = json.loads(control.read_text())
-        if record.get("headSha") != head or record.get("sourceSha") != source or record.get("files") != files or record.get("directory") != str(directory):
+        if record.get("sourceSha") != source or record.get("files") != files or record.get("directory") != str(directory):
             raise WorkflowError("Preparation source SHA or Project boundary changed; retain existing preparation for reassessment")
-        return record
+        if record.get("headSha") == head:
+            return record
+        # A legitimate product HEAD advance gets a fresh preparation generation.
+        # Keep the old edits and evidence; never silently apply them to a new HEAD.
+        previous = {key: record[key] for key in ("directory", "headSha", "sourceSha", "files")}
+        generation = hashlib.sha256(json.dumps([head, source, files]).encode()).hexdigest()
+        area = area / "preparation-versions" / generation
+        directory, control = area / "preparation", area / "preparation-control.json"
+        if area.resolve() != area.absolute() or directory.is_symlink() or control.is_symlink():
+            raise WorkflowError("Preparation generation is redirected")
+        if control.exists():
+            current = json.loads(control.read_text())
+            if any(current.get(key) != value for key, value in {
+                "headSha": head, "sourceSha": source, "files": files, "directory": str(directory)}.items()):
+                raise WorkflowError("Preparation generation ownership changed; evidence retained")
+            return current
+    else:
+        previous = None
     if directory.exists():
         raise WorkflowError("Preparation directory exists without its ownership record; retained")
     # Resolve every source before writing anything. Source is the pinned Git blob,
@@ -66,6 +83,9 @@ def ensure_preparation(workflow) -> dict | None:
         path.chmod(mode)
     record = {"directory": str(directory), "headSha": head, "sourceSha": source, "files": files,
         "instruction": "Only these execution-local preparation copies may be edited. Product files, AC, expected results, business authorization, runtime state and host command allowlists stay fixed. Record reasons/diffs and rerun affected verification."}
+    if previous:
+        record["previousPreparation"] = previous
+        record["instruction"] += " Product HEAD advanced. Review previousPreparation for reusable fixes; revalidate compatibility and rerun verification. Old evidence is not proof for this HEAD."
     atomic_json(control, record)
     return record
 
@@ -140,12 +160,20 @@ def assert_preparation_verified(workflow) -> dict | None:
     if not current["changedFiles"]:
         return current
     # A preparation repair invalidates earlier verification.
-    for path in (workflow.root / ".ralph/verification" / workflow.state["claimId"]).rglob("*.json"):
-        if path.name == "manifest.json":
+    area = workflow.root / ".ralph/verification" / workflow.state["claimId"]
+    # Host results and preview sessions are Runner-generated records. Agent notes,
+    # fixture payloads and screenshots' metadata are not verification records.
+    paths = [path for path in area.glob("*.json") if re.fullmatch(r"[a-f0-9]{32}\.json", path.name)]
+    paths.extend(path for path in area.glob("browser/session-*/preview.json")
+                 if re.fullmatch(r"session-[a-f0-9]{32}", path.parent.name))
+    for path in sorted(paths):
+        if path.is_symlink() or path.resolve() != path.absolute():
             continue
         try:
             record = json.loads(path.read_text())
         except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or not isinstance(record.get("status"), str) or not isinstance(record.get("preparationWorkspace"), dict):
             continue
         if (record.get("claimId") == workflow.state["claimId"] and record.get("headSha") == current["headSha"]
                 and record.get("sourceUnchanged") is True and record.get("preparationUnchanged") is True

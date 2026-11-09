@@ -279,6 +279,22 @@ class GitHubWorkflowTest(unittest.TestCase):
             status = main()
         return status, errors.getvalue()
 
+    def test_internal_shape_error_retains_execution_and_stops_instead_of_unbounded_retry(self):
+        worker = FakeWorkflow(self.config, "worker", self.remote)
+        worker.prepare()
+        for error in (AttributeError('sensitive attribute details'), TypeError('sensitive type details')):
+            with self.subTest(error=type(error).__name__), patch.object(worker, 'finish', side_effect=error), \
+                    patch.object(worker, 'schedule_operation_recovery', side_effect=AssertionError('Do not restart the product Agent')):
+                status, message = self.finish_through_cli(worker)
+                self.assertEqual(status, 78)
+                self.assertIn('Internal data-shape error', message)
+                self.assertNotIn('sensitive', message)
+                self.assertTrue(worker.state_path.is_file())
+                saved = json.loads(worker.state_path.read_text())
+                self.assertEqual(saved['task']['id'], 'task-1')
+                self.assertEqual(saved['executionError']['phase'], 'finish')
+                self.assertFalse(self.remote['prs'])
+
     def test_missing_result_retains_claim_and_changes_and_resumes_same_worktree(self):
         worker = FakeWorkflow(self.config, "worker", self.remote)
         context = worker.prepare()
@@ -787,6 +803,7 @@ class GitHubWorkflowTest(unittest.TestCase):
         worker, cwd = self.manifest_worker(["app.txt"])
         worker.schedule_operation_recovery("finish", "unknown failure")
         worker.state["recoveryBudget"]["startedAt"] -= 901
+        worker.state["recoveryBudget"]["startedMonotonic"] -= 901
         worker.save()
         with self.assertRaises(RecoveryDeferred):
             worker.prepare()
@@ -934,6 +951,123 @@ class GitHubWorkflowTest(unittest.TestCase):
         self.assertEqual((cwd / "app.txt").read_text(), "unfinished implementation\n")
         self.assertEqual(json.loads(Path(context["verificationRetry"]["previousResultPath"]).read_text())["decision"], "blocked")
         self.assertFalse(list(worker.deferred_records()))
+
+    def expired_preparation_verification(self, role, deferred=False):
+        from ralph.lib.preparation_workspace import preparation_snapshot, assert_preparation_verified
+        self.worker()
+        if role == "manager":
+            reviewer = FakeWorkflow(self.config, "reviewer", self.remote)
+            context = reviewer.prepare()
+            atomic_json(Path(context["resultPath"]), {"decision": "approve", "summary": "Reviewed"})
+            reviewer.finish()
+        config = json.loads(self.config.read_text())
+        config["verification"] = {"preparationFiles": ["app.txt"]}
+        atomic_json(self.config, config)
+        workflow = FakeWorkflow(self.config, role, self.remote)
+        context = workflow.prepare()
+        original_claim = context["claimId"]
+        (Path(context["verificationPreparation"]["directory"]) / "app.txt").write_text("repaired fixture")
+        current = preparation_snapshot(workflow)
+        record = {"claimId": original_claim, "headSha": current["headSha"], "sourceUnchanged": True,
+            "preparationUnchanged": True, "preparationWorkspace": current, "status": "passed"}
+        proof = self.repo / ".ralph/verification" / original_claim / ("1" * 32 + ".json")
+        atomic_json(proof, record)
+        before = proof.read_bytes()
+        decision = {"decision": "approve" if role == "reviewer" else "accept", "summary": "Previous verified judgment"}
+        atomic_json(Path(context["resultPath"]), decision)
+        self.remote["expiredClaims"] = {original_claim}
+        if deferred:
+            workflow.state["pendingResult"] = decision
+            workflow.save()
+            workflow.defer_execution("Claim-bound preparation evidence requires maintenance")
+            operate(self.repo, role, role, "resume")
+            workflow = FakeWorkflow(self.config, role, self.remote)
+            self.assertTrue(workflow.prepare()["pending"])
+        with self.assertRaisesRegex(ReviewRepairScheduled, "Claim changed"):
+            workflow.finish()
+        self.assertNotEqual(workflow.state["claimId"], original_claim)
+        self.assertNotIn("operationRecovery", workflow.state)
+        self.assertFalse(list(workflow.deferred_records()))
+        self.assertEqual(json.loads(Path(workflow.state["verificationRetry"]["previousResultPath"]).read_text()), decision)
+        self.assertEqual(proof.read_bytes(), before)
+        self.assertEqual(self.remote["task"]["status"], "in_review" if role == "reviewer" else "wait_accept")
+        fresh = FakeWorkflow(self.config, role, self.remote)
+        updated = fresh.prepare()
+        self.assertFalse(updated.get("pending", False))
+        self.assertEqual(updated["mcpClaimId"], updated["claimId"])
+        self.assertEqual(updated["cwd"], context["cwd"])
+        self.assertEqual(preparation_snapshot(fresh), current)
+        with self.assertRaisesRegex(WorkflowError, "fresh successful"):
+            assert_preparation_verified(fresh)
+        # Only fresh evidence from the new Claim permits the saved judgment to be reissued.
+        atomic_json(self.repo / ".ralph/verification" / updated["claimId"] / ("2" * 32 + ".json"),
+            {**record, "claimId": updated["claimId"]})
+        atomic_json(Path(updated["resultPath"]), decision)
+        fresh.finish()
+        self.assertEqual(self.remote["task"]["status"], "wait_accept" if role == "reviewer" else "accepted")
+        self.assertEqual(proof.read_bytes(), before)
+
+    def test_expired_review_preparation_returns_to_role_with_fresh_mcp_and_retained_evidence(self):
+        self.expired_preparation_verification("reviewer")
+
+    def test_expired_acceptance_preparation_returns_to_role_with_fresh_mcp_and_retained_evidence(self):
+        self.expired_preparation_verification("manager")
+
+    def test_deferred_saved_review_resumes_into_verification_without_another_diagnostic_agent(self):
+        self.expired_preparation_verification("reviewer", deferred=True)
+
+    def test_repeated_preparation_claim_refresh_is_bounded_and_preserves_result(self):
+        worker, cwd = self.manifest_worker(["app.txt"])
+        worker.config["retry"] = {"recovery": {"maxAttempts": 1}}
+        result = {"decision": "blocked", "summary": "Expired verification"}
+        with self.assertRaises(ReviewRepairScheduled):
+            worker.retry_verification(result, "Claim expired")
+        worker.state["pendingResult"] = result
+        worker.save()
+        with self.assertRaises(RecoveryDeferred):
+            worker.retry_verification(result, "Claim expired again")
+        retained = list(worker.deferred_records())
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0][1]["pendingResult"], result)
+        self.assertEqual(retained[0][1]["verificationRetry"]["attempt"], 1)
+
+    def test_legacy_verification_deadline_does_not_prevent_fresh_claim_retry(self):
+        worker, cwd = self.manifest_worker(["app.txt"])
+        worker.state["verificationRetry"] = {"attempt": 1}
+        worker.state["recoveryBudget"] = {"startedAt": 1, "attempts": 1}
+        worker.state["verificationRecoveryRequired"] = {"claimId": worker.state["claimId"], "reason": "claim_expired"}
+        self.remote["expiredClaims"] = {worker.state["claimId"]}
+        atomic_json(Path(worker.state["resultPath"]), {"decision": "blocked", "summary": "Expired while suspended"})
+        worker.save()
+        with self.assertRaises(ReviewRepairScheduled):
+            worker.finish()
+        self.assertEqual(worker.state["verificationRetry"]["attempt"], 2)
+        self.assertNotIn("recoveryBudget", worker.state)
+        self.assertFalse(list(worker.deferred_records()))
+
+    def test_new_mcp_context_clears_only_the_previous_claim_expiry_flag(self):
+        worker, cwd = self.manifest_worker(["app.txt"])
+        old = worker.state["claimId"]
+        worker.state["verificationRecoveryRequired"] = {"claimId": old, "reason": "claim_expired"}
+        worker.save()
+        self.remote["expiredClaims"] = {old}
+        context = worker.prepare()
+        self.assertNotEqual(context["claimId"], old)
+        self.assertEqual(context["mcpClaimId"], context["claimId"])
+        self.assertNotIn("verificationRecoveryRequired", context)
+
+    def test_expired_repair_preserves_the_agent_result_before_parking(self):
+        worker, cwd = self.manifest_worker(["app.txt"])
+        worker.schedule_operation_recovery("agent", "temporary failure")
+        worker.state["recoveryBudget"]["startedMonotonic"] -= 901
+        result = {"decision": "complete", "summary": "Finished; revalidate before application", "files": ["app.txt"], "commitMessage": "Change"}
+        atomic_json(Path(worker.state["resultPath"]), result)
+        with self.assertRaises(RecoveryDeferred):
+            worker.finish()
+        records = list(worker.deferred_records())
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0][1]["pendingResult"], result)
+        self.assertFalse(self.remote["prs"])
 
     def test_resume_reexecutes_blocked_task_with_a_fresh_claim_and_keeps_evidence(self):
         worker, cwd = self.manifest_worker(["app.txt"])

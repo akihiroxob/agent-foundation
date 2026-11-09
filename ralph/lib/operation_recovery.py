@@ -37,7 +37,26 @@ class OperationRecovery:
     def recovery_remaining(self):
         _, seconds = self.recovery_limits()
         budget = self.state.get("recoveryBudget")
-        return max(0, int(seconds - (time.time() - budget["startedAt"]))) if budget else seconds
+        if not budget:
+            return seconds
+        elapsed = (time.monotonic() - budget["startedMonotonic"] if "startedMonotonic" in budget
+                   else time.time() - budget["startedAt"])
+        return max(0, int(seconds - max(0, elapsed)))
+
+    def separate_verification_budget(self):
+        # Older executions shared the repair deadline with ordinary re-verification.
+        # Preserve its audit trail while keeping the verification attempt limit separate.
+        if self.state.get("verificationRetry") and self.state.get("recoveryBudget") and not self.state.get("operationRecovery") and not self.state.get("workerRepair"):
+            self.state["verificationRetry"]["previousRecoveryBudget"] = self.state.pop("recoveryBudget")
+            self.save()
+
+    def reserve_verification_retry(self):
+        limit, _ = self.recovery_limits()
+        attempt = self.state.get("verificationRetry", {}).get("attempt", 0) + 1
+        if attempt > limit:
+            self.defer_execution(f"Verification Claim refresh limit reached ({limit}); progress retained")
+            raise RecoveryDeferred("Verification Claim refresh limit reached")
+        return attempt, limit
 
     def recovery_cwd(self):
         if __package__:
@@ -74,7 +93,7 @@ class OperationRecovery:
             from host_verification import fingerprint
         cwd = self.recovery_cwd()
         limit, _ = self.recovery_limits()
-        budget = self.state.setdefault("recoveryBudget", {"startedAt": time.time(), "attempts": 0})
+        budget = self.state.setdefault("recoveryBudget", {"startedAt": time.time(), "startedMonotonic": time.monotonic(), "attempts": 0})
         result_path = Path(self.state.get("resultPath", cwd / ".ralph-result.json"))
         result_hash = hashlib.sha256(result_path.read_bytes()).hexdigest() if result_path.is_file() and not result_path.is_symlink() else None
         signature = hashlib.sha256(json.dumps([stage, self.phase, reason,

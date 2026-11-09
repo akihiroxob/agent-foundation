@@ -26,6 +26,7 @@ Contextの`task.completionMode`が`evidence`なら、Repositoryを変更しな�
 `summary`はそのままPR本文へ表示されるMarkdown文字列にする。`### 変更内容`・`### ACとの対応`・`### 検証結果`・`### 文書`・`### 未接続・未検証`の見出しと短い箇条書きで整理する。見出しとリストの前後には空行を入れ、コマンド・path・識別子はバッククォートで囲む。長い説明は複数項目に分け、報告全体をコードブロックで囲まない。JSONの改行は`\n`としてエンコードし、読み込んだ文字列が実際の改行になるようにする。
 
 Gitのcommit/push、PR作成、Wachaの完了・release操作はRalphが実行する。Agentはこれらを実行しない。
+base branchとの競合解消でもAgentはmerge commitを作らない。`git merge --no-commit --no-ff`で統合し、競合を解消したindexと`MERGE_HEAD`を保持して結果を返す。`files`は統合後の`git diff --cached --name-only HEAD`と追加・削除を照合する。commitはRalphへ委ね、既存commitの履歴を書き換えない。
 環境・権限・認証などで進めない場合は`decision: blocked`と具体的な`summary`を出力する。
 Reviewer差し戻しは同じPRの修正、Manager差し戻しは新規PRになる。差し戻し理由を先に読む。
 ## 終了前の確認
